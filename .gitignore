@@ -1,5 +1,4 @@
 .env
-data/db.sqlite
 __pycache__/
 *.pyc
 .venv/
