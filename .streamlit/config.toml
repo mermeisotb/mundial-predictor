@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#00D26A" # Un verde "cancha" o tu color de marca
+backgroundColor = "#0E1117" # Fondo oscuro profesional
+secondaryBackgroundColor = "#262730" # Cajas y paneles laterales
+textColor = "#FAFAFA"
+font = "sans serif"

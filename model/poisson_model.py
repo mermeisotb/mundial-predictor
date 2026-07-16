@@ -5,15 +5,40 @@ DB_PATH = "data/db.sqlite"
 MAX_GOALS = 6  # tope de goles a simular por equipo
 
 
+def probability_to_fair_odds(probability):
+    """Converts a percentage probability into decimal fair odds."""
+    if probability <= 0:
+        return None
+    return round(100 / probability, 2)
+
+
 def get_finished_matches():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT home_team, away_team, home_score, away_score
-        FROM matches
-        WHERE status = 'FINISHED'
-    """)
-    rows = cursor.fetchall()
+    rows = []
+
+    # The tournament table is updated with current World Cup results.
+    try:
+        cursor.execute("""
+            SELECT home_team, away_team, home_score, away_score
+            FROM matches
+            WHERE status = 'FINISHED'
+        """)
+        rows.extend(cursor.fetchall())
+    except sqlite3.OperationalError:
+        pass
+
+    # Before and during the tournament, historical internationals provide
+    # the sample needed to estimate every team's scoring strength.
+    try:
+        cursor.execute("""
+            SELECT home_team, away_team, home_score, away_score
+            FROM historical_matches
+        """)
+        rows.extend(cursor.fetchall())
+    except sqlite3.OperationalError:
+        pass
+
     conn.close()
     return rows
 
@@ -21,6 +46,9 @@ def get_finished_matches():
 def calculate_team_stats():
     """Calcula promedio de goles anotados/recibidos por equipo, y fuerza de ataque/defensa relativa"""
     matches = get_finished_matches()
+
+    if not matches:
+        return {}, None
 
     goals_for = {}
     goals_against = {}
@@ -62,7 +90,7 @@ def calculate_team_stats():
 def predict_match(home_team, away_team):
     stats, avg_goals_match = calculate_team_stats()
 
-    if home_team not in stats or away_team not in stats:
+    if avg_goals_match is None or home_team not in stats or away_team not in stats:
         print(f"Sin datos suficientes para {home_team} o {away_team}")
         return None
 
@@ -84,19 +112,36 @@ def predict_match(home_team, away_team):
     draw = sum(p for (h, a), p in score_matrix.items() if h == a)
     away_win = sum(p for (h, a), p in score_matrix.items() if h < a)
 
-    btts = sum(p for (h, a), p in score_matrix.items() if h > 0 and a > 0)
-    over_2_5 = sum(p for (h, a), p in score_matrix.items() if h + a > 2.5)
+    # MAX_GOALS truncates a small part of the Poisson tails. Normalizing makes
+    # the 1X2 probabilities add up to 100%, so fair odds are mathematically
+    # consistent and can be compared with bookmaker odds.
+    total_probability = home_win + draw + away_win
+    home_win /= total_probability
+    draw /= total_probability
+    away_win /= total_probability
+
+    btts = sum(p for (h, a), p in score_matrix.items() if h > 0 and a > 0) / total_probability
+    over_2_5 = sum(p for (h, a), p in score_matrix.items() if h + a > 2.5) / total_probability
 
     top_scores = sorted(score_matrix.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    home_win_prob = round(home_win * 100, 1)
+    draw_prob = round(draw * 100, 1)
+    away_win_prob = round(away_win * 100, 1)
 
     return {
         "home_team": home_team,
         "away_team": away_team,
         "lambda_home": round(lambda_home, 2),
         "lambda_away": round(lambda_away, 2),
-        "home_win_prob": round(home_win * 100, 1),
-        "draw_prob": round(draw * 100, 1),
-        "away_win_prob": round(away_win * 100, 1),
+        "home_win_prob": home_win_prob,
+        "draw_prob": draw_prob,
+        "away_win_prob": away_win_prob,
+        "fair_odds": {
+            "home": probability_to_fair_odds(home_win_prob),
+            "draw": probability_to_fair_odds(draw_prob),
+            "away": probability_to_fair_odds(away_win_prob),
+        },
         "btts_prob": round(btts * 100, 1),
         "over_2_5_prob": round(over_2_5 * 100, 1),
         "top_scores": [(score, round(p * 100, 1)) for score, p in top_scores],

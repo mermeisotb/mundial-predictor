@@ -5,3 +5,4 @@ scipy
 requests
 plotly
 python-dotenv
+streamlit-options-menu

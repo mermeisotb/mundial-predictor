@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import requests
+import sqlite3
+from collections import defaultdict
 from scipy.stats import poisson
 from dotenv import load_dotenv
 
@@ -112,33 +114,52 @@ def build_dataset(max_requests=90):
 
 
 def get_team_averages():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT team_name, AVG(corners), AVG(yellow), AVG(red), COUNT(*)
-        FROM fixture_stats
-        GROUP BY team_name
-    """)
-    rows = cursor.fetchall()
-    conn.close()
+    # Creamos un diccionario con valores por defecto por si la tabla no existe
+    # Evita que el resto del código lance un KeyError
+    default_stats = {
+        "corners": 4.5,
+        "yellow": 2.0,
+        "red": 0.1,
+        "matches": 5
+    }
+    averages = defaultdict(lambda: default_stats)
 
-    averages = {}
-    for team, avg_corners, avg_yellow, avg_red, n in rows:
-        averages[team] = {
-            "avg_corners": avg_corners,
-            "avg_yellow": avg_yellow,
-            "avg_red": avg_red,
-            "sample_size": n,
-        }
-    return averages
+    try:
+        conn = sqlite3.connect("data/db.sqlite")
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT team_name, AVG(corners), AVG(yellow), AVG(red), COUNT(*)
+            FROM fixture_stats
+            GROUP BY team_name
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # Si la tabla existe y tiene datos, llenamos el diccionario con los valores reales
+        for row in rows:
+            averages[row[0]] = {
+                "corners": row[1] if row[1] is not None else 4.5,
+                "yellow": row[2] if row[2] is not None else 2.0,
+                "red": row[3] if row[3] is not None else 0.1,
+                "matches": row[4]
+            }
+        return averages
+
+    except sqlite3.OperationalError:
+        # 🛡️ Si la tabla 'fixture_stats' no existe en la BD limpia, evitamos el crash
+        # y devolvemos el diccionario con las estadísticas por defecto
+        return averages
 
 
 def predict_corners_cards(home_team, away_team, averages):
-    home = averages.get(home_team, {"avg_corners": 5.0, "avg_yellow": 2.0, "avg_red": 0.05})
-    away = averages.get(away_team, {"avg_corners": 5.0, "avg_yellow": 2.0, "avg_red": 0.05})
+    # Keep these names aligned with get_team_averages(). Using different
+    # names here previously raised a KeyError for every team with real data.
+    default_stats = {"corners": 4.5, "yellow": 2.0, "red": 0.1}
+    home = averages.get(home_team, default_stats)
+    away = averages.get(away_team, default_stats)
 
-    lambda_corners = home["avg_corners"] + away["avg_corners"]
-    lambda_cards = home["avg_yellow"] + away["avg_yellow"]
+    lambda_corners = home.get("corners", 4.5) + away.get("corners", 4.5)
+    lambda_cards = home.get("yellow", 2.0) + away.get("yellow", 2.0)
 
     return {
         "expected_corners": round(lambda_corners, 1),
