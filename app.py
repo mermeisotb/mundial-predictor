@@ -517,10 +517,15 @@ def render_players_tab():
         "Jugador", "Pos", "Club", "Valor de mercado (€)", "Partidos con selección",
         "PJ Mundial", "Goles", "Asistencias", "Rating prom.", "Minutos",
     ])
-    df["Valor de mercado (€)"] = df["Valor de mercado (€)"].apply(
-        lambda v: f"€{v:,.0f}" if pd.notna(v) else "-"
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Valor de mercado (€)": st.column_config.NumberColumn(format="€%d"),
+            "Rating prom.": st.column_config.NumberColumn(format="%.2f"),
+        },
     )
-    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 def render_worldcup26_tab():
