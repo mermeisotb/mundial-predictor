@@ -6,6 +6,15 @@ DB_PATH = "data/db.sqlite"
 
 DEFAULT_STATS = {"corners": 4.5, "yellow": 2.0, "matches": 5}
 
+CORNER_LINES = [5.5, 7.5, 9.5]
+CARD_LINES = [1.5, 2.5, 3.5]
+
+
+def probability_to_fair_odds(probability):
+    if probability <= 0:
+        return None
+    return round(100 / probability, 2)
+
 
 def get_team_averages():
     """Promedios reales del Mundial 2026: córners desde kaggle_match_team_stats,
@@ -54,6 +63,25 @@ def get_team_averages():
         return averages
 
 
+def calculate_poisson_lines(lambda_value, lines):
+    """Probabilidad de Over/Under para cada línea, usando una distribución
+    de Poisson simple con el lambda combinado (local + visita)."""
+    result = {}
+    for line in lines:
+        # line siempre termina en .5, así que floor(line) = cantidad de eventos
+        # que hay que igualar o superar para el Over.
+        threshold = int(line)
+        over_prob = round((1 - poisson.cdf(threshold, lambda_value)) * 100, 1)
+        under_prob = round(100 - over_prob, 1)
+        result[line] = {
+            "over_prob": over_prob,
+            "under_prob": under_prob,
+            "fair_odd_over": probability_to_fair_odds(over_prob),
+            "fair_odd_under": probability_to_fair_odds(under_prob),
+        }
+    return result
+
+
 def predict_corners_cards(home_team, away_team, averages):
     home = averages.get(home_team, DEFAULT_STATS)
     away = averages.get(away_team, DEFAULT_STATS)
@@ -63,12 +91,18 @@ def predict_corners_cards(home_team, away_team, averages):
     lambda_corners = home_corners + away_corners
     lambda_cards = home.get("yellow", 2.0) + away.get("yellow", 2.0)
 
+    corner_lines = calculate_poisson_lines(lambda_corners, CORNER_LINES)
+    card_lines = calculate_poisson_lines(lambda_cards, CARD_LINES)
+
     return {
         "home_expected_corners": round(home_corners, 1),
         "away_expected_corners": round(away_corners, 1),
         "expected_corners": round(lambda_corners, 1),
         "expected_cards": round(lambda_cards, 1),
-        "over_9_5_corners_prob": round((1 - poisson.cdf(9, lambda_corners)) * 100, 1),
-        "over_3_5_cards_prob": round((1 - poisson.cdf(3, lambda_cards)) * 100, 1),
+        # se mantienen por compatibilidad con código que ya los use
+        "over_9_5_corners_prob": corner_lines[9.5]["over_prob"],
+        "over_3_5_cards_prob": card_lines[3.5]["over_prob"],
+        "corner_lines": corner_lines,
+        "card_lines": card_lines,
         "note": "Córners: promedio real Mundial 2026 (Kaggle). Tarjetas: estimado a partir del total de tarjetas por selección / partidos jugados.",
     }

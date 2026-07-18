@@ -31,6 +31,10 @@ TEAM_COLORS = {
 }
 DEFAULT_COLOR = "#888888"
 
+GOAL_MARKET_LINES = [1.5, 2.5, 3.5]
+CORNER_MARKET_LINES = [5.5, 7.5, 9.5]
+CARD_MARKET_LINES = [1.5, 2.5, 3.5]
+
 st.set_page_config(page_title="Mundial Predictor", page_icon="🏆", layout="wide")
 
 st.markdown("""
@@ -253,6 +257,7 @@ def obtener_cuotas_mercado(home, away):
             return cuota_home, cuota_draw, cuota_away
     return None, None, None
 
+
 def get_market_odds(tabla, home, away):
     """Devuelve todas las líneas over/under cargadas para un partido en una tabla dada."""
     rows = run_query(f"""
@@ -263,12 +268,18 @@ def get_market_odds(tabla, home, away):
     return rows
 
 
+def get_market_odds_by_line(tabla, home, away):
+    """Igual que get_market_odds pero indexado por línea, para lookup rápido."""
+    return {line: (odd_over, odd_under) for line, odd_over, odd_under in get_market_odds(tabla, home, away)}
+
+
 def get_btts_odds(home, away):
     rows = run_query("""
         SELECT odd_yes, odd_no FROM btts_odds
         WHERE (home_team = ? AND away_team = ?) OR (home_team = ? AND away_team = ?)
     """, (home, away, away, home))
     return rows[0] if rows else (None, None)
+
 
 def get_teams_with_players():
     return [r[0] for r in run_query("SELECT DISTINCT team_name FROM players ORDER BY team_name ASC")]
@@ -351,6 +362,7 @@ def render_odds_comparison(home, away, poisson_result):
                 )
     st.divider()
 
+
 def render_edge_metric(label, prob_modelo, odd_real):
     prob_mercado = (1 / odd_real) * 100
     edge = prob_modelo - prob_mercado
@@ -358,67 +370,89 @@ def render_edge_metric(label, prob_modelo, odd_real):
     return edge
 
 
-def render_secondary_markets(home, away, poisson_result, corners_cards_result):
-    st.subheader("Otros mercados con datos del modelo")
-    st.caption("Comparación disponible para las líneas que el modelo calcula explícitamente.")
-
-    cols = st.columns(4)
+def render_market_group(titulo, icono, items):
+    """items: lista de (label_linea, prob_modelo, odd_real_o_None).
+    Devuelve lista de (nombre_completo, edge) para las líneas con cuota real."""
+    st.markdown(f"**{icono} {titulo}**")
+    cols = st.columns(len(items))
     edges = []
+    for col, (label, prob_modelo, odd_real) in zip(cols, items):
+        with col:
+            if odd_real:
+                edge = render_edge_metric(label, prob_modelo, odd_real)
+                edges.append((f"{titulo} {label}", edge))
+            else:
+                st.metric(label, f"{prob_modelo}%")
+                st.caption("Cuota real pendiente")
+    return edges
 
-    goals_rows = get_market_odds("goals_odds", home, away)
-    linea_25 = next((r for r in goals_rows if r[0] == 2.5), None)
-    with cols[0]:
-        if linea_25 and linea_25[1]:
-            edges.append(("Más de 2.5 goles", render_edge_metric(
-                "Más de 2.5 goles", poisson_result["over_2_5_prob"], linea_25[1]
-            )))
-        else:
-            st.metric("Más de 2.5 goles", f"{poisson_result['over_2_5_prob']}%")
-            st.caption("Cuota real pendiente")
 
-    corners_rows = get_market_odds("corners_odds", home, away)
-    linea_95c = next((r for r in corners_rows if r[0] == 9.5), None)
-    with cols[1]:
-        if linea_95c and linea_95c[1]:
-            edges.append(("Más de 9.5 córners", render_edge_metric(
-                "Más de 9.5 córners", corners_cards_result["over_9_5_corners_prob"], linea_95c[1]
-            )))
-        else:
-            st.metric("Más de 9.5 córners", f"{corners_cards_result['over_9_5_corners_prob']}%")
-            st.caption("Cuota real pendiente")
+def render_secondary_markets(home, away, poisson_result, corners_cards_result):
+    st.subheader("Mercados")
+    st.caption("Líneas agrupadas por categoría. Edge = diferencia entre la probabilidad del modelo y la implícita en la cuota real.")
 
-    cards_rows = get_market_odds("cards_odds", home, away)
-    linea_35t = next((r for r in cards_rows if r[0] == 3.5), None)
-    with cols[2]:
-        if linea_35t and linea_35t[1]:
-            edges.append(("Más de 3.5 tarjetas", render_edge_metric(
-                "Más de 3.5 tarjetas", corners_cards_result["over_3_5_cards_prob"], linea_35t[1]
-            )))
-        else:
-            st.metric("Más de 3.5 tarjetas", f"{corners_cards_result['over_3_5_cards_prob']}%")
-            st.caption("Cuota real pendiente")
+    all_edges = []
 
-    odd_yes, odd_no = get_btts_odds(home, away)
-    with cols[3]:
+    # --- Goles ---
+    goals_by_line = get_market_odds_by_line("goals_odds", home, away)
+    goal_items = [
+        (f"+{line}", poisson_result["goal_lines"][line]["over_prob"], goals_by_line.get(line, (None, None))[0])
+        for line in GOAL_MARKET_LINES
+    ]
+    all_edges += render_market_group("Goles", "⚽", goal_items)
+    st.divider()
+
+    # --- Córners ---
+    corners_by_line = get_market_odds_by_line("corners_odds", home, away)
+    corner_items = [
+        (f"+{line}", corners_cards_result["corner_lines"][line]["over_prob"], corners_by_line.get(line, (None, None))[0])
+        for line in CORNER_MARKET_LINES
+    ]
+    all_edges += render_market_group("Córners", "🚩", corner_items)
+    st.divider()
+
+    # --- Tarjetas ---
+    cards_by_line = get_market_odds_by_line("cards_odds", home, away)
+    card_items = [
+        (f"+{line}", corners_cards_result["card_lines"][line]["over_prob"], cards_by_line.get(line, (None, None))[0])
+        for line in CARD_MARKET_LINES
+    ]
+    all_edges += render_market_group("Tarjetas", "🟨", card_items)
+    st.divider()
+
+    # --- Ambos anotan ---
+    st.markdown("**🤝 Ambos anotan**")
+    odd_yes, _ = get_btts_odds(home, away)
+    col = st.columns(1)[0]
+    with col:
         if odd_yes:
-            edges.append(("Ambos anotan", render_edge_metric(
-                "Ambos anotan", poisson_result["btts_prob"], odd_yes
-            )))
+            edge = render_edge_metric("Sí", poisson_result["btts_prob"], odd_yes)
+            all_edges.append(("Ambos anotan", edge))
         else:
-            st.metric("Ambos anotan", f"{poisson_result['btts_prob']}%")
+            st.metric("Sí", f"{poisson_result['btts_prob']}%")
             st.caption("Cuota real pendiente")
+    st.divider()
 
-    mejor = max(edges, key=lambda x: x[1], default=None)
-    if mejor and mejor[1] >= 5:
-        st.success(f"📈 Posible valor en **{mejor[0]}**: +{mejor[1]:.1f} puntos porcentuales sobre el mercado.")
+    # --- Radar de valor: top 3 oportunidades ---
+    top_edges = sorted(all_edges, key=lambda x: x[1], reverse=True)
+    top_edges = [e for e in top_edges if e[1] >= 5][:3]
+    if top_edges:
+        st.markdown("**📈 Mejores oportunidades vs mercado**")
+        for nombre, edge in top_edges:
+            st.success(f"**{nombre}**: +{edge:.1f} puntos porcentuales sobre el mercado.")
+        st.divider()
 
-    # Líneas adicionales sin comparación de modelo (informativas)
+    # --- Líneas adicionales sin comparación de modelo (informativas) ---
     otras_lineas = []
+    lineas_cubiertas = {
+        "goals_odds": set(GOAL_MARKET_LINES),
+        "corners_odds": set(CORNER_MARKET_LINES),
+        "cards_odds": set(CARD_MARKET_LINES),
+    }
     for tabla, nombre in [("goals_odds", "Goles"), ("corners_odds", "Córners"), ("cards_odds", "Tarjetas")]:
         rows = get_market_odds(tabla, home, away)
-        principales = {2.5} if tabla == "goals_odds" else ({9.5} if tabla == "corners_odds" else {3.5})
         for line, odd_over, odd_under in rows:
-            if line not in principales:
+            if line not in lineas_cubiertas[tabla]:
                 otras_lineas.append((nombre, line, odd_over, odd_under))
 
     if otras_lineas:
@@ -427,6 +461,7 @@ def render_secondary_markets(home, away, poisson_result, corners_cards_result):
                 st.write(f"{nombre} {line}: Over {odd_over} / Under {odd_under}")
 
     st.divider()
+
 
 def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, show_odds_comparison=False):
     header_col1, header_col2, header_col3 = st.columns([1, 3, 1])
@@ -483,11 +518,13 @@ def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, sh
                 except Exception:
                     st.info("⚠️ No se pudieron calcular estimaciones para este encuentro.")
 
+    # 1) Cuotas con resultados (1X2: modelo vs mercado) — lo más importante primero
     if show_odds_comparison and poisson_result:
         render_odds_comparison(home, away, poisson_result)
 
     render_prediction_features(home, away)
 
+    # 2) Mercados importantes, agrupados por categoría, con radar de valor
     if poisson_result:
         cc_result = predict_corners_cards(home, away, corner_averages) if corner_averages else None
         if cc_result:
