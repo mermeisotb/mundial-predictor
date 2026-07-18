@@ -69,15 +69,20 @@ def process_file(conn, path):
         odd_draw = odds.get("Draw") or odds.get("Empate")
         odd_away = odds.get(away)
         if odd_home and odd_draw and odd_away:
-            conn.execute("DELETE FROM match_odds WHERE home_team = ? AND away_team = ?", (home, away))
+            deleted = conn.execute(
+                "DELETE FROM match_odds WHERE home_team = ? AND away_team = ?", (home, away)
+            ).rowcount
             conn.execute(
                 "INSERT INTO match_odds (home_team, away_team, odd_home, odd_draw, odd_away, last_update) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (home, away, odd_home, odd_draw, odd_away, now),
             )
-            print(f"  1X2 actualizado: {home} {odd_home} / Empate {odd_draw} / {away} {odd_away}")
+            print(f"  1X2 actualizado ({deleted} fila(s) vieja(s) borrada(s)): "
+                  f"{home} {odd_home} / Empate {odd_draw} / {away} {odd_away}")
         else:
             print(f"  [!] 1X2 incompleto para {home} vs {away}, se omite (revisa el CSV)")
+            print(f"      Detectado: home={odd_home}, draw={odd_draw}, away={odd_away}")
+            print(f"      Selections en el CSV: {list(odds.keys())}")
 
     # --- Líneas de goles Over/Under ---
     goals_rows = [r for r in rows if GOALS_MARKET_KEYWORD in r["market"].strip().lower()]
