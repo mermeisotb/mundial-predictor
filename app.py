@@ -593,6 +593,12 @@ def main():
         )
 
         st.divider()
+        if st.button("🔄 Refrescar datos"):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.rerun()
+
+        st.divider()
         st.caption("Datos: football-data.org · worldcup26.ir · Kaggle")
 
     if menu_seleccionado == "Predicciones":
