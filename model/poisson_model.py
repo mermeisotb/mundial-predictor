@@ -1,6 +1,8 @@
 import sqlite3
 from scipy.stats import poisson
 
+from data.lineup_adjustments import get_absences
+
 DB_PATH = "data/db.sqlite"
 MAX_GOALS = 6  # tope de goles a simular por equipo
 GOAL_LINES = [0.5, 1.5, 2.5, 3.5, 4.5]
@@ -140,9 +142,8 @@ def get_team_recent_xg(team_name):
 
 
 def calculate_expected_goals(home_team, away_team, lambda_home, lambda_away):
-    """Combina el lambda Poisson (histórico goles) con el xG real reciente
-    (Kaggle) cuando está disponible. Si no hay xG cargado para un equipo,
-    ese lado usa directamente el lambda Poisson."""
+    """Combina el lambda Poisson (histórico goles, ya ajustado por bajas si
+    corresponde) con el xG real reciente (Kaggle) cuando está disponible."""
     xg_home = get_team_recent_xg(home_team)
     xg_away = get_team_recent_xg(away_team)
 
@@ -161,6 +162,45 @@ def calculate_expected_goals(home_team, away_team, lambda_home, lambda_away):
     }
 
 
+def apply_lineup_adjustment(team_name, lambda_value, absent_players):
+    """Resta al lambda del equipo el aporte goleador estimado de cada
+    jugador ausente (goles + 0.5*asistencias por partido jugado). Nunca
+    deja el lambda por debajo del 30% del valor original."""
+    if not absent_players:
+        return lambda_value, []
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    notes = []
+    total_reduction = 0.0
+
+    for player_name in absent_players:
+        try:
+            cursor.execute("""
+                SELECT goals, assists, matches_played FROM players
+                WHERE team_name = ? AND player_name = ?
+            """, (team_name, player_name))
+            row = cursor.fetchone()
+        except sqlite3.OperationalError:
+            row = None
+
+        if not row or not row[2]:
+            notes.append(f"{player_name}: sin datos suficientes, no se pudo ajustar")
+            continue
+
+        goals, assists, matches_played = row
+        goals = goals or 0
+        assists = assists or 0
+        production_per_match = (goals + 0.5 * assists) / matches_played
+        total_reduction += production_per_match
+        notes.append(f"{player_name}: -{round(production_per_match, 2)} goles/partido estimados")
+
+    conn.close()
+
+    adjusted = max(lambda_value - total_reduction, lambda_value * 0.3)
+    return round(adjusted, 2), notes
+
+
 def predict_match(home_team, away_team):
     stats, avg_goals_match = calculate_team_stats()
 
@@ -173,6 +213,17 @@ def predict_match(home_team, away_team):
 
     lambda_home = home["attack_strength"] * away["defense_strength"] * avg_goals_match
     lambda_away = away["attack_strength"] * home["defense_strength"] * avg_goals_match
+
+    # Ajuste por bajas confirmadas (11 inicial), si hay alguna cargada
+    # manualmente en data/lineup_adjustments.py para este cruce.
+    lineup_notes = []
+    absences = get_absences(home_team, away_team)
+    if absences.get(home_team):
+        lambda_home, notes_h = apply_lineup_adjustment(home_team, lambda_home, absences[home_team])
+        lineup_notes += [f"{home_team}: {n}" for n in notes_h]
+    if absences.get(away_team):
+        lambda_away, notes_a = apply_lineup_adjustment(away_team, lambda_away, absences[away_team])
+        lineup_notes += [f"{away_team}: {n}" for n in notes_a]
 
     score_matrix = {}
     for h in range(MAX_GOALS + 1):
@@ -217,6 +268,7 @@ def predict_match(home_team, away_team):
         "over_2_5_prob": round(over_2_5 * 100, 1),
         "goal_lines": goal_lines,
         "expected_goals": expected_goals,
+        "lineup_notes": lineup_notes,
         "top_scores": [(score, round(p * 100, 1)) for score, p in top_scores],
     }
 
@@ -227,6 +279,10 @@ if __name__ == "__main__":
     if result:
         print(f"\n--- {result['home_team']} vs {result['away_team']} ---")
         print(f"Goles esperados: {result['home_team']} {result['lambda_home']} - {result['lambda_away']} {result['away_team']}")
+        if result["lineup_notes"]:
+            print("\nAjustes por bajas confirmadas:")
+            for n in result["lineup_notes"]:
+                print(f"  {n}")
         eg = result["expected_goals"]
         print(f"\nExpected Goals combinado (Poisson + xG real):")
         print(f"  {result['home_team']}: {eg['expected_home']} (Poisson {eg['poisson_home']} / xG real {eg['xg_home']})")
@@ -237,10 +293,6 @@ if __name__ == "__main__":
         print(f"  Empate: {result['draw_prob']}%")
         print(f"  Gana {result['away_team']}: {result['away_win_prob']}%")
         print(f"  Ambos anotan: {result['btts_prob']}%")
-        print(f"\nLíneas de goles:")
-        for line, data in result['goal_lines'].items():
-            print(f"  Más de {line}: {data['over_prob']}% (cuota {data['fair_odd_over']}) / "
-                  f"Menos de {line}: {data['under_prob']}% (cuota {data['fair_odd_under']})")
         print(f"\nMarcadores más probables:")
         for (h, a), prob in result['top_scores']:
             print(f"  {h}-{a}: {prob}%")
