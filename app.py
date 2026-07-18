@@ -377,7 +377,7 @@ def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, sh
 
     with col3:
         with st.container(border=True):
-            st.markdown("**Corners y tarjetas (est. Mundial 2022)**")
+            st.markdown("**Corners y tarjetas (est. Mundial 2026)**")
             if corner_averages is None:
                 st.info("⚠️ Estadísticas históricas de córners y tarjetas no disponibles en la base de datos.")
             else:
