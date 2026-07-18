@@ -283,7 +283,23 @@ def render_advanced_insights(home, away, poisson_result):
                     """, unsafe_allow_html=True)
     st.divider()
 
-
+def obtener_cuotas_mercado(home, away):
+    """Obtiene la última cuota disponible para el mismo cruce de selecciones."""
+    rows = run_query("""
+        SELECT home_team, away_team, odd_home, odd_draw, odd_away
+        FROM match_odds
+        WHERE home_team IS NOT NULL AND away_team IS NOT NULL
+        ORDER BY last_update DESC
+    """)
+    home_normalizado = normalizar_equipo(home)
+    away_normalizado = normalizar_equipo(away)
+    for odds_home, odds_away, cuota_home, cuota_draw, cuota_away in rows:
+        if (
+            normalizar_equipo(odds_home) == home_normalizado
+            and normalizar_equipo(odds_away) == away_normalizado
+        ):
+            return cuota_home, cuota_draw, cuota_away
+    return None, None, None
 def get_market_odds(tabla, home, away):
     """Devuelve todas las líneas over/under cargadas para un partido en una tabla dada."""
     rows = run_query(f"""
@@ -557,12 +573,7 @@ def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, sh
             render_secondary_markets(home, away, poisson_result, cc_result)
 
     if poisson_result:
-        c_local, c_empate, c_visita = obtener_cuotas_mercado(home, away)
-        render_cuotas_mercado(
-            home, away,
-            poisson_result['home_win_prob'], poisson_result['draw_prob'], poisson_result['away_win_prob'],
-            c_local, c_empate, c_visita,
-        )
+        render_advanced_insights(home, away, poisson_result)
 
         st.markdown("**Marcadores mas probables**")
         scores_cols = st.columns(5)
