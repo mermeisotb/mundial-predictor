@@ -3,6 +3,7 @@ from scipy.stats import poisson
 
 DB_PATH = "data/db.sqlite"
 MAX_GOALS = 6  # tope de goles a simular por equipo
+GOAL_LINES = [0.5, 1.5, 2.5, 3.5, 4.5]
 
 
 def probability_to_fair_odds(probability):
@@ -10,6 +11,22 @@ def probability_to_fair_odds(probability):
     if probability <= 0:
         return None
     return round(100 / probability, 2)
+
+
+def calculate_goal_lines(score_matrix, total_probability):
+    """Probabilidad de Over/Under para cada línea de goles totales del partido."""
+    lines = {}
+    for line in GOAL_LINES:
+        over = sum(p for (h, a), p in score_matrix.items() if h + a > line) / total_probability
+        over_prob = round(over * 100, 1)
+        under_prob = round(100 - over_prob, 1)
+        lines[line] = {
+            "over_prob": over_prob,
+            "under_prob": under_prob,
+            "fair_odd_over": probability_to_fair_odds(over_prob),
+            "fair_odd_under": probability_to_fair_odds(under_prob),
+        }
+    return lines
 
 
 def get_finished_matches():
@@ -122,6 +139,7 @@ def predict_match(home_team, away_team):
 
     btts = sum(p for (h, a), p in score_matrix.items() if h > 0 and a > 0) / total_probability
     over_2_5 = sum(p for (h, a), p in score_matrix.items() if h + a > 2.5) / total_probability
+    goal_lines = calculate_goal_lines(score_matrix, total_probability)
 
     top_scores = sorted(score_matrix.items(), key=lambda x: x[1], reverse=True)[:5]
 
@@ -144,6 +162,7 @@ def predict_match(home_team, away_team):
         },
         "btts_prob": round(btts * 100, 1),
         "over_2_5_prob": round(over_2_5 * 100, 1),
+        "goal_lines": goal_lines,
         "top_scores": [(score, round(p * 100, 1)) for score, p in top_scores],
     }
 
@@ -159,7 +178,10 @@ if __name__ == "__main__":
         print(f"  Empate: {result['draw_prob']}%")
         print(f"  Gana {result['away_team']}: {result['away_win_prob']}%")
         print(f"  Ambos anotan: {result['btts_prob']}%")
-        print(f"  Más de 2.5 goles: {result['over_2_5_prob']}%")
+        print(f"\nLíneas de goles:")
+        for line, data in result['goal_lines'].items():
+            print(f"  Más de {line}: {data['over_prob']}% (cuota {data['fair_odd_over']}) / "
+                  f"Menos de {line}: {data['under_prob']}% (cuota {data['fair_odd_under']})")
         print(f"\nMarcadores más probables:")
         for (h, a), prob in result['top_scores']:
             print(f"  {h}-{a}: {prob}%")
