@@ -313,7 +313,7 @@ def render_cuotas_mercado(home, away, prob_local, prob_empate, prob_visita,
 
 def render_odds_comparison(home, away, poisson_result):
     st.subheader("Cuotas: modelo vs mercado")
-    st.caption("La cuota teórica proviene del modelo Poisson; la cuota real se carga desde The Odds API.")
+    st.caption("La cuota teórica proviene del modelo Poisson; la cuota real se carga manualmente desde casas de apuestas (ej. Betano).")
 
     real_home, real_draw, real_away = obtener_cuotas_mercado(home, away)
     fair_odds = poisson_result["fair_odds"]
