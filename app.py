@@ -1,11 +1,10 @@
 import re
 import sqlite3
 from datetime import datetime
-
+from model.monte_carlo import simulate_match
 import pandas as pd
 import streamlit as st
 from streamlit_option_menu import option_menu
-
 from model.elo import calculate_elo_ratings
 from model.poisson_model import predict_match
 from model.h2h import calculate_h2h_probability
@@ -239,23 +238,50 @@ def get_worldcup26_results():
     """)
 
 
-def obtener_cuotas_mercado(home, away):
-    """Obtiene la última cuota disponible para el mismo cruce de selecciones."""
-    rows = run_query("""
-        SELECT home_team, away_team, odd_home, odd_draw, odd_away
-        FROM match_odds
-        WHERE home_team IS NOT NULL AND away_team IS NOT NULL
-        ORDER BY last_update DESC
-    """)
-    home_normalizado = normalizar_equipo(home)
-    away_normalizado = normalizar_equipo(away)
-    for odds_home, odds_away, cuota_home, cuota_draw, cuota_away in rows:
-        if (
-            normalizar_equipo(odds_home) == home_normalizado
-            and normalizar_equipo(odds_away) == away_normalizado
-        ):
-            return cuota_home, cuota_draw, cuota_away
-    return None, None, None
+def render_advanced_insights(home, away, poisson_result):
+    st.markdown("**⚡ Expected Goals (xG)**")
+    eg = poisson_result["expected_goals"]
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"xG {home}", eg["expected_home"],
+               delta=f"Poisson {eg['poisson_home']}" + (f" / real {eg['xg_home']}" if eg["xg_home"] else ""))
+    c2.metric(f"xG {away}", eg["expected_away"],
+               delta=f"Poisson {eg['poisson_away']}" + (f" / real {eg['xg_away']}" if eg["xg_away"] else ""))
+    c3.metric("xG total esperado", eg["expected_total"])
+    if not eg["has_real_xg"]:
+        st.caption("Sin xG real cargado para este cruce todavía — usando solo el modelo Poisson.")
+    st.divider()
+
+    with st.expander("🎲 Simulación Monte Carlo (10,000 partidos)"):
+        mc = simulate_match(home, away)
+        if mc is None:
+            st.info("Sin datos suficientes para simular este cruce.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f"Gana {home}", f"{mc['home_win_prob']}%")
+            c2.metric("Empate", f"{mc['draw_prob']}%")
+            c3.metric(f"Gana {away}", f"{mc['away_win_prob']}%")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Más de 1.5 goles", f"{mc['over_1_5_prob']}%")
+            c2.metric("Más de 2.5 goles", f"{mc['over_2_5_prob']}%")
+            c3.metric("Más de 3.5 goles", f"{mc['over_3_5_prob']}%")
+
+            st.caption(
+                f"Promedio de goles totales: {mc['avg_total_goals']} "
+                f"(rango p10-p90: {mc['goals_p10']}-{mc['goals_p90']})"
+            )
+
+            st.markdown("**Marcadores más frecuentes en la simulación**")
+            score_cols = st.columns(5)
+            for col, (score, prob) in zip(score_cols, mc["top_scores"]):
+                with col:
+                    st.markdown(f"""
+                        <div style="text-align: center;">
+                            <div style="font-size: 16px; color: #AAAAAA;">{prob}%</div>
+                            <div style="font-size: 26px; font-weight: 700;">{score[0]}-{score[1]}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+    st.divider()
 
 
 def get_market_odds(tabla, home, away):
