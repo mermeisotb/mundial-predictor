@@ -4,6 +4,7 @@ from scipy.stats import poisson
 DB_PATH = "data/db.sqlite"
 MAX_GOALS = 6  # tope de goles a simular por equipo
 GOAL_LINES = [0.5, 1.5, 2.5, 3.5, 4.5]
+XG_WEIGHT = 0.4  # peso del xG real sobre el lambda Poisson cuando hay dato disponible
 
 
 def probability_to_fair_odds(probability):
@@ -34,7 +35,6 @@ def get_finished_matches():
     cursor = conn.cursor()
     rows = []
 
-    # The tournament table is updated with current World Cup results.
     try:
         cursor.execute("""
             SELECT home_team, away_team, home_score, away_score
@@ -45,8 +45,6 @@ def get_finished_matches():
     except sqlite3.OperationalError:
         pass
 
-    # Before and during the tournament, historical internationals provide
-    # the sample needed to estimate every team's scoring strength.
     try:
         cursor.execute("""
             SELECT home_team, away_team, home_score, away_score
@@ -104,6 +102,65 @@ def calculate_team_stats():
     return stats, avg_goals_match
 
 
+def get_team_recent_xg(team_name):
+    """xG real más reciente del equipo, desde kaggle_match_prediction_features
+    (prev_avg_xg_scored). Busca la fila más nueva donde el equipo aparezca
+    como local o visita. Devuelve None si no hay dato."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT home_prev_avg_xg_scored, date FROM kaggle_match_prediction_features
+            WHERE home_team_name = ? AND home_prev_avg_xg_scored IS NOT NULL
+            ORDER BY date DESC LIMIT 1
+        """, (team_name,))
+        home_row = cursor.fetchone()
+
+        cursor.execute("""
+            SELECT away_prev_avg_xg_scored, date FROM kaggle_match_prediction_features
+            WHERE away_team_name = ? AND away_prev_avg_xg_scored IS NOT NULL
+            ORDER BY date DESC LIMIT 1
+        """, (team_name,))
+        away_row = cursor.fetchone()
+
+        conn.close()
+    except sqlite3.OperationalError:
+        return None
+
+    candidates = [r for r in (home_row, away_row) if r]
+    if not candidates:
+        return None
+
+    xg_value, _ = max(candidates, key=lambda r: r[1])
+    try:
+        return float(xg_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def calculate_expected_goals(home_team, away_team, lambda_home, lambda_away):
+    """Combina el lambda Poisson (histórico goles) con el xG real reciente
+    (Kaggle) cuando está disponible. Si no hay xG cargado para un equipo,
+    ese lado usa directamente el lambda Poisson."""
+    xg_home = get_team_recent_xg(home_team)
+    xg_away = get_team_recent_xg(away_team)
+
+    expected_home = (lambda_home * (1 - XG_WEIGHT) + xg_home * XG_WEIGHT) if xg_home is not None else lambda_home
+    expected_away = (lambda_away * (1 - XG_WEIGHT) + xg_away * XG_WEIGHT) if xg_away is not None else lambda_away
+
+    return {
+        "poisson_home": round(lambda_home, 2),
+        "poisson_away": round(lambda_away, 2),
+        "xg_home": round(xg_home, 2) if xg_home is not None else None,
+        "xg_away": round(xg_away, 2) if xg_away is not None else None,
+        "expected_home": round(expected_home, 2),
+        "expected_away": round(expected_away, 2),
+        "expected_total": round(expected_home + expected_away, 2),
+        "has_real_xg": xg_home is not None or xg_away is not None,
+    }
+
+
 def predict_match(home_team, away_team):
     stats, avg_goals_match = calculate_team_stats()
 
@@ -114,11 +171,9 @@ def predict_match(home_team, away_team):
     home = stats[home_team]
     away = stats[away_team]
 
-    # lambda = goles esperados, combinando ataque propio y defensa rival
     lambda_home = home["attack_strength"] * away["defense_strength"] * avg_goals_match
     lambda_away = away["attack_strength"] * home["defense_strength"] * avg_goals_match
 
-    # matriz de probabilidades de marcador exacto
     score_matrix = {}
     for h in range(MAX_GOALS + 1):
         for a in range(MAX_GOALS + 1):
@@ -129,9 +184,6 @@ def predict_match(home_team, away_team):
     draw = sum(p for (h, a), p in score_matrix.items() if h == a)
     away_win = sum(p for (h, a), p in score_matrix.items() if h < a)
 
-    # MAX_GOALS truncates a small part of the Poisson tails. Normalizing makes
-    # the 1X2 probabilities add up to 100%, so fair odds are mathematically
-    # consistent and can be compared with bookmaker odds.
     total_probability = home_win + draw + away_win
     home_win /= total_probability
     draw /= total_probability
@@ -140,6 +192,7 @@ def predict_match(home_team, away_team):
     btts = sum(p for (h, a), p in score_matrix.items() if h > 0 and a > 0) / total_probability
     over_2_5 = sum(p for (h, a), p in score_matrix.items() if h + a > 2.5) / total_probability
     goal_lines = calculate_goal_lines(score_matrix, total_probability)
+    expected_goals = calculate_expected_goals(home_team, away_team, lambda_home, lambda_away)
 
     top_scores = sorted(score_matrix.items(), key=lambda x: x[1], reverse=True)[:5]
 
@@ -163,6 +216,7 @@ def predict_match(home_team, away_team):
         "btts_prob": round(btts * 100, 1),
         "over_2_5_prob": round(over_2_5 * 100, 1),
         "goal_lines": goal_lines,
+        "expected_goals": expected_goals,
         "top_scores": [(score, round(p * 100, 1)) for score, p in top_scores],
     }
 
@@ -173,6 +227,11 @@ if __name__ == "__main__":
     if result:
         print(f"\n--- {result['home_team']} vs {result['away_team']} ---")
         print(f"Goles esperados: {result['home_team']} {result['lambda_home']} - {result['lambda_away']} {result['away_team']}")
+        eg = result["expected_goals"]
+        print(f"\nExpected Goals combinado (Poisson + xG real):")
+        print(f"  {result['home_team']}: {eg['expected_home']} (Poisson {eg['poisson_home']} / xG real {eg['xg_home']})")
+        print(f"  {result['away_team']}: {eg['expected_away']} (Poisson {eg['poisson_away']} / xG real {eg['xg_away']})")
+        print(f"  Total esperado: {eg['expected_total']}")
         print(f"\nProbabilidades:")
         print(f"  Gana {result['home_team']}: {result['home_win_prob']}%")
         print(f"  Empate: {result['draw_prob']}%")
