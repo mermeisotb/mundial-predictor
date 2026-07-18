@@ -480,8 +480,8 @@ def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, sh
                     st.write(f"Mas de 9.5 corners: {cc['over_9_5_corners_prob']}%")
                     st.write(f"Mas de 3.5 tarjetas: {cc['over_3_5_cards_prob']}%")
                     st.caption(cc['note'])
-                except Exception:
-                    st.info("⚠️ No se pudieron calcular estimaciones para este encuentro.")
+                except Exception as e:
+                    st.error(f"⚠️ Error real: {e}")
 
     if show_odds_comparison and poisson_result:
         render_odds_comparison(home, away, poisson_result)
