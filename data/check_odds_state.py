@@ -1,8 +1,7 @@
 """Muestra el estado actual de las cuotas cargadas en db.sqlite para un
-cruce, con fecha de ultima actualizacion. Util para confirmar que un
-load_manual_odds.py realmente escribio lo esperado.
+cruce, desglosado por casa de apuestas, con fecha de ultima actualizacion.
 
-Uso: py -3 data/check_odds_state.py France England
+Uso: py -3 data/check_odds_state.py Spain Argentina
 """
 import sqlite3
 import sys
@@ -18,18 +17,27 @@ def main():
     home, away = sys.argv[1], sys.argv[2]
     conn = sqlite3.connect(DB_PATH)
 
-    print(f"\n=== match_odds ({home} vs {away}) ===")
+    print(f"\n=== match_odds (1X2) — {home} vs {away} ===")
     for row in conn.execute(
-        "SELECT odd_home, odd_draw, odd_away, last_update FROM match_odds "
-        "WHERE home_team = ? AND away_team = ? ORDER BY last_update DESC",
+        "SELECT bookmaker, odd_home, odd_draw, odd_away, last_update FROM match_odds "
+        "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker",
         (home, away),
     ):
         print(row)
 
-    print(f"\n=== goals_odds ({home} vs {away}) ===")
+    for table, label in [("goals_odds", "Goles"), ("corners_odds", "Corners"), ("cards_odds", "Tarjetas")]:
+        print(f"\n=== {table} ({label}) — {home} vs {away} ===")
+        for row in conn.execute(
+            f"SELECT bookmaker, line, odd_over, odd_under, last_update FROM {table} "
+            "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker, line",
+            (home, away),
+        ):
+            print(row)
+
+    print(f"\n=== btts_odds — {home} vs {away} ===")
     for row in conn.execute(
-        "SELECT line, odd_over, odd_under, last_update FROM goals_odds "
-        "WHERE home_team = ? AND away_team = ? ORDER BY line",
+        "SELECT bookmaker, odd_yes, odd_no, last_update FROM btts_odds "
+        "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker",
         (home, away),
     ):
         print(row)

@@ -1,0 +1,24 @@
+home_team,away_team,market,selection,odd
+Spain,Argentina,Resultado del partido,Spain,2.37
+Spain,Argentina,Resultado del partido,Draw,2.90
+Spain,Argentina,Resultado del partido,Argentina,3.50
+Spain,Argentina,Goles totales,Over 2.5,2.22
+Spain,Argentina,Goles totales,Under 2.5,1.67
+Spain,Argentina,Goles totales,Over 1.5,1.42
+Spain,Argentina,Goles totales,Under 1.5,2.92
+Spain,Argentina,Goles totales,Over 3.5,3.90
+Spain,Argentina,Goles totales,Under 3.5,1.26
+Spain,Argentina,Corners totales,Over 7.5,1.67
+Spain,Argentina,Corners totales,Under 7.5,2.12
+Spain,Argentina,Corners totales,Over 6.5,1.36
+Spain,Argentina,Corners totales,Under 6.5,3.00
+Spain,Argentina,Corners totales,Over 8.5,2.15
+Spain,Argentina,Corners totales,Under 8.5,1.65
+Spain,Argentina,Tarjetas totales,Over 3.5,1.70
+Spain,Argentina,Tarjetas totales,Under 3.5,2.07
+Spain,Argentina,Tarjetas totales,Over 2.5,1.31
+Spain,Argentina,Tarjetas totales,Under 2.5,3.25
+Spain,Argentina,Tarjetas totales,Over 4.5,2.37
+Spain,Argentina,Tarjetas totales,Under 4.5,1.55
+Spain,Argentina,Ambos marcan,Si,1.83
+Spain,Argentina,Ambos marcan,No,1.91

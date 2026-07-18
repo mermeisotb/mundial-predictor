@@ -283,23 +283,55 @@ def render_advanced_insights(home, away, poisson_result):
                     """, unsafe_allow_html=True)
     st.divider()
 
-def obtener_cuotas_mercado(home, away):
-    """Obtiene la última cuota disponible para el mismo cruce de selecciones."""
-    rows = run_query("""
-        SELECT home_team, away_team, odd_home, odd_draw, odd_away
-        FROM match_odds
-        WHERE home_team IS NOT NULL AND away_team IS NOT NULL
-        ORDER BY last_update DESC
-    """)
-    home_normalizado = normalizar_equipo(home)
-    away_normalizado = normalizar_equipo(away)
-    for odds_home, odds_away, cuota_home, cuota_draw, cuota_away in rows:
-        if (
-            normalizar_equipo(odds_home) == home_normalizado
-            and normalizar_equipo(odds_away) == away_normalizado
+"""Muestra el estado actual de las cuotas cargadas en db.sqlite para un
+cruce, desglosado por casa de apuestas, con fecha de ultima actualizacion.
+
+Uso: py -3 data/check_odds_state.py Spain Argentina
+"""
+import sqlite3
+import sys
+
+DB_PATH = "data/db.sqlite"
+
+
+def main():
+    if len(sys.argv) != 3:
+        print("Uso: py -3 data/check_odds_state.py <Local> <Visita>")
+        return
+
+    home, away = sys.argv[1], sys.argv[2]
+    conn = sqlite3.connect(DB_PATH)
+
+    print(f"\n=== match_odds (1X2) — {home} vs {away} ===")
+    for row in conn.execute(
+        "SELECT bookmaker, odd_home, odd_draw, odd_away, last_update FROM match_odds "
+        "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker",
+        (home, away),
+    ):
+        print(row)
+
+    for table, label in [("goals_odds", "Goles"), ("corners_odds", "Corners"), ("cards_odds", "Tarjetas")]:
+        print(f"\n=== {table} ({label}) — {home} vs {away} ===")
+        for row in conn.execute(
+            f"SELECT bookmaker, line, odd_over, odd_under, last_update FROM {table} "
+            "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker, line",
+            (home, away),
         ):
-            return cuota_home, cuota_draw, cuota_away
-    return None, None, None
+            print(row)
+
+    print(f"\n=== btts_odds — {home} vs {away} ===")
+    for row in conn.execute(
+        "SELECT bookmaker, odd_yes, odd_no, last_update FROM btts_odds "
+        "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker",
+        (home, away),
+    ):
+        print(row)
+
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()
 def get_market_odds(tabla, home, away):
     """Devuelve todas las líneas over/under cargadas para un partido en una tabla dada."""
     rows = run_query(f"""
@@ -384,7 +416,7 @@ def render_odds_comparison(home, away, poisson_result):
     st.subheader("Cuotas: modelo vs mercado")
     st.caption("La cuota teórica proviene del modelo Poisson; la cuota real se carga manualmente desde casas de apuestas (ej. Betano).")
 
-    real_home, real_draw, real_away = obtener_cuotas_mercado(home, away)
+    real_home, real_draw, real_away, bookmaker_1x2 = obtener_cuotas_mercado(home, away)
     fair_odds = poisson_result["fair_odds"]
 
     columns = st.columns(3)
@@ -464,7 +496,7 @@ def render_secondary_markets(home, away, poisson_result, corners_cards_result):
 
     # --- Ambos anotan ---
     st.markdown("**🤝 Ambos anotan**")
-    odd_yes, _ = get_btts_odds(home, away)
+    odd_yes, _, _ = get_btts_odds(home, away)
     col = st.columns(1)[0]
     with col:
         if odd_yes:
