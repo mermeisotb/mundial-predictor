@@ -58,10 +58,14 @@ def predict_corners_cards(home_team, away_team, averages):
     home = averages.get(home_team, DEFAULT_STATS)
     away = averages.get(away_team, DEFAULT_STATS)
 
-    lambda_corners = home.get("corners", 4.5) + away.get("corners", 4.5)
+    home_corners = home.get("corners", 4.5)
+    away_corners = away.get("corners", 4.5)
+    lambda_corners = home_corners + away_corners
     lambda_cards = home.get("yellow", 2.0) + away.get("yellow", 2.0)
 
     return {
+        "home_expected_corners": round(home_corners, 1),
+        "away_expected_corners": round(away_corners, 1),
         "expected_corners": round(lambda_corners, 1),
         "expected_cards": round(lambda_cards, 1),
         "over_9_5_corners_prob": round((1 - poisson.cdf(9, lambda_corners)) * 100, 1),

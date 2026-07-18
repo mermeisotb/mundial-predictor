@@ -475,7 +475,7 @@ def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, sh
             else:
                 try:
                     cc = predict_corners_cards(home, away, corner_averages)
-                    st.write(f"Corners esperados: {cc['expected_corners']}")
+                    st.write(f"Corners esperados: {cc['home_expected_corners']} ({home}) + {cc['away_expected_corners']} ({away}) = {cc['expected_corners']}")
                     st.write(f"Tarjetas amarillas esperadas: {cc['expected_cards']}")
                     st.write(f"Mas de 9.5 corners: {cc['over_9_5_corners_prob']}%")
                     st.write(f"Mas de 3.5 tarjetas: {cc['over_3_5_cards_prob']}%")
