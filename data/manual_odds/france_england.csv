@@ -1,27 +1,26 @@
 home_team,away_team,market,selection,odd
-France,England,Resultado del partido SuperCuotas,France,1.95
-France,England,Resultado del partido SuperCuotas,Draw,3.95
-France,England,Resultado del partido SuperCuotas,England,3.85
-France,England,Resultado del partido,France,1.91
-France,England,Resultado del partido,Draw,3.85
-France,England,Resultado del partido,England,3.75
-France,England,Goles totales Más/Menos,Over 3.5,2.1
+France,England,Resultado del partido SuperCuotas,France,1.88
+France,England,Resultado del partido SuperCuotas,Draw,4.10
+France,England,Resultado del partido SuperCuotas,England,4.00
+France,England,Resultado del partido,France,1.85
+France,England,Resultado del partido,Draw,3.95
+France,England,Resultado del partido,England,3.85
+France,England,3er Puesto,France,1.45
+France,England,3er Puesto,England,2.75
+France,England,Método de triunfo,France in regular time,1.85
+France,England,Método de triunfo,England in regular time,3.85
+France,England,Método de triunfo,France in extra time,10.00
+France,England,Método de triunfo,England in extra time,17.00
+France,England,Método de triunfo,France on penalties,15.00
+France,England,Método de triunfo,England on penalties,15.00
+France,England,Goles totales Más/Menos,Over 3.5,2.10
 France,England,Goles totales Más/Menos,Under 3.5,1.75
 France,England,Goles totales Más/Menos,Over 2.5,1.47
 France,England,Goles totales Más/Menos,Under 2.5,2.72
-France,England,Goles totales Más/Menos,Over 4.5,3.4
+France,England,Goles totales Más/Menos,Over 4.5,3.45
 France,England,Goles totales Más/Menos,Under 4.5,1.32
-France,England,Ambos equipos anotan,Yes,1.42
-France,England,Ambos equipos anotan,No,2.75
-France,England,Córners Más/Menos,Over 9.5,2.02
-France,England,Córners Más/Menos,Under 9.5,1.75
-France,England,Córners Más/Menos,Over 8.5,1.62
-France,England,Córners Más/Menos,Under 8.5,2.22
-France,England,Córners Más/Menos,Over 10.5,2.67
-France,England,Córners Más/Menos,Under 10.5,1.44
-France,England,Tarjetas Totales Más/Menos,Over 2.5,2.07
-France,England,Tarjetas Totales Más/Menos,Under 2.5,1.7
-France,England,Tarjetas Totales Más/Menos,Over 1.5,1.42
-France,England,Tarjetas Totales Más/Menos,Under 1.5,2.75
-France,England,Tarjetas Totales Más/Menos,Over 3.5,3.3
-France,England,Tarjetas Totales Más/Menos,Under 3.5,1.3
+France,England,20% SÚPER MEJORADAS,"Over 2.5 Cards, Over 8.5 Corners, Over 3.5 Goals",7.56
+France,England,20% SÚPER MEJORADAS,"O. Dembele 1+ SOT, France Win, Over 3.5 Goals",4.68
+France,England,10% MEJORADAS,"Over 2.5 Cards, K. Mbappe 2+ SOT, France Win",5.50
+France,England,10% MEJORADAS,"Over 8.5 Corners, Over 3.5 Goals, B. Saka 1+ SOT",7.04
+France,England,10% MEJORADAS,"France Win, D. Henderson 4+ Saves, Over 9.5 Corners",7.37
