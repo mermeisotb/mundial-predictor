@@ -347,14 +347,17 @@ def get_market_odds(tabla, home, away):
 
 
 def get_market_odds_by_line(tabla, home, away):
-    """Igual que antes pero usando la mejor cuota entre casas: {line: (odd_over, odd_under)}."""
+    """Mejor cuota entre casas, incluye de que casa salio: {line: (odd_over, odd_under, bookmaker)}."""
     best_over = get_best_market_odds_by_line(tabla, home, away)
     rows_all = get_all_market_odds(tabla, home, away)
     under_by_line = {}
     for bookmaker, line, odd_over, odd_under in rows_all:
         if odd_under is not None and (line not in under_by_line or odd_under > under_by_line[line]):
             under_by_line[line] = odd_under
-    return {line: (data[0], under_by_line.get(line)) for line, data in best_over.items()}
+    return {
+        line: (data[0], under_by_line.get(line), data[1])
+        for line, data in best_over.items()
+    }
 
 
 def get_btts_odds(home, away):
@@ -424,23 +427,25 @@ def render_odds_comparison(home, away, poisson_result):
     st.divider()
 
 
-def render_edge_metric(label, prob_modelo, odd_real):
+def render_edge_metric(label, prob_modelo, odd_real, bookmaker=None):
     prob_mercado = (1 / odd_real) * 100
     edge = prob_modelo - prob_mercado
-    st.metric(label, f"{prob_modelo:.1f}%", delta=f"Mercado: {prob_mercado:.1f}% · edge {edge:+.1f} pp")
+    fuente = f" ({bookmaker})" if bookmaker else ""
+    st.metric(label, f"{prob_modelo:.1f}%",
+               delta=f"Mercado{fuente}: {prob_mercado:.1f}% (cuota {odd_real:.2f}) · edge {edge:+.1f} pp")
     return edge
 
 
 def render_market_group(titulo, icono, items):
-    """items: lista de (label_linea, prob_modelo, odd_real_o_None).
+    """items: lista de (label_linea, prob_modelo, odd_real_o_None, bookmaker_o_None).
     Devuelve lista de (nombre_completo, edge) para las líneas con cuota real."""
     st.markdown(f"**{icono} {titulo}**")
     cols = st.columns(len(items))
     edges = []
-    for col, (label, prob_modelo, odd_real) in zip(cols, items):
+    for col, (label, prob_modelo, odd_real, bookmaker) in zip(cols, items):
         with col:
             if odd_real:
-                edge = render_edge_metric(label, prob_modelo, odd_real)
+                edge = render_edge_metric(label, prob_modelo, odd_real, bookmaker)
                 edges.append((f"{titulo} {label}", edge))
             else:
                 st.metric(label, f"{prob_modelo}%")
@@ -457,7 +462,8 @@ def render_secondary_markets(home, away, poisson_result, corners_cards_result):
     # --- Goles ---
     goals_by_line = get_market_odds_by_line("goals_odds", home, away)
     goal_items = [
-        (f"+{line}", poisson_result["goal_lines"][line]["over_prob"], goals_by_line.get(line, (None, None))[0])
+        (f"+{line}", poisson_result["goal_lines"][line]["over_prob"],
+         goals_by_line.get(line, (None, None, None))[0], goals_by_line.get(line, (None, None, None))[2])
         for line in GOAL_MARKET_LINES
     ]
     all_edges += render_market_group("Goles", "⚽", goal_items)
@@ -466,7 +472,8 @@ def render_secondary_markets(home, away, poisson_result, corners_cards_result):
     # --- Córners ---
     corners_by_line = get_market_odds_by_line("corners_odds", home, away)
     corner_items = [
-        (f"+{line}", corners_cards_result["corner_lines"][line]["over_prob"], corners_by_line.get(line, (None, None))[0])
+        (f"+{line}", corners_cards_result["corner_lines"][line]["over_prob"],
+         corners_by_line.get(line, (None, None, None))[0], corners_by_line.get(line, (None, None, None))[2])
         for line in CORNER_MARKET_LINES
     ]
     all_edges += render_market_group("Córners", "🚩", corner_items)
@@ -475,7 +482,8 @@ def render_secondary_markets(home, away, poisson_result, corners_cards_result):
     # --- Tarjetas ---
     cards_by_line = get_market_odds_by_line("cards_odds", home, away)
     card_items = [
-        (f"+{line}", corners_cards_result["card_lines"][line]["over_prob"], cards_by_line.get(line, (None, None))[0])
+        (f"+{line}", corners_cards_result["card_lines"][line]["over_prob"],
+         cards_by_line.get(line, (None, None, None))[0], cards_by_line.get(line, (None, None, None))[2])
         for line in CARD_MARKET_LINES
     ]
     all_edges += render_market_group("Tarjetas", "🟨", card_items)
@@ -483,11 +491,11 @@ def render_secondary_markets(home, away, poisson_result, corners_cards_result):
 
     # --- Ambos anotan ---
     st.markdown("**🤝 Ambos anotan**")
-    odd_yes, _, _ = get_btts_odds(home, away)
+    odd_yes, _, bookmaker_btts = get_btts_odds(home, away)
     col = st.columns(1)[0]
     with col:
         if odd_yes:
-            edge = render_edge_metric("Sí", poisson_result["btts_prob"], odd_yes)
+            edge = render_edge_metric("Sí", poisson_result["btts_prob"], odd_yes, bookmaker_btts)
             all_edges.append(("Ambos anotan", edge))
         else:
             st.metric("Sí", f"{poisson_result['btts_prob']}%")
