@@ -545,6 +545,21 @@ def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, sh
         if flag:
             st.image(flag, width=60)
 
+    # --- Alineaciones (solo para el partido de mañana) ---
+    if home == "Spain" and away == "Argentina":
+        if st.button("📋 Ver alineaciones confirmadas", key=f"lineups_btn_{match_id}"):
+            st.session_state[f"show_lineups_{match_id}"] = True
+
+        if st.session_state.get(f"show_lineups_{match_id}"):
+            @st.dialog("Alineaciones — Spain vs Argentina", width="large")
+            def _lineups_dialog():
+                import json
+                with open("data/spain_argentina_lineups.json", encoding="utf-8") as f:
+                    data = json.load(f)
+                render_lineups_stacked(data["spain"], data["argentina"])
+            _lineups_dialog()
+            st.session_state[f"show_lineups_{match_id}"] = False
+
     col1, col2, col3 = st.columns(3)
 
     with col1:

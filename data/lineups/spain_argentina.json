@@ -1,0 +1,168 @@
+{
+  "spain": {
+    "team": "Spain",
+    "formation": "4-3-3",
+    "players": [
+      {
+        "number": 23,
+        "name": "U. Simón",
+        "position": "GK",
+        "line": 1,
+        "slot": 1
+      },
+      {
+        "number": 12,
+        "name": "P. Porro",
+        "position": "DF",
+        "line": 2,
+        "slot": 1
+      },
+      {
+        "number": 22,
+        "name": "P. Cubarsí",
+        "position": "DF",
+        "line": 2,
+        "slot": 2
+      },
+      {
+        "number": 14,
+        "name": "A. Laporte",
+        "position": "DF",
+        "line": 2,
+        "slot": 3
+      },
+      {
+        "number": 24,
+        "name": "M. Cucurella",
+        "position": "DF",
+        "line": 2,
+        "slot": 4
+      },
+      {
+        "number": 16,
+        "name": "Rodri",
+        "position": "MF",
+        "line": 3,
+        "slot": 1
+      },
+      {
+        "number": 8,
+        "name": "F. Ruiz",
+        "position": "MF",
+        "line": 3,
+        "slot": 2
+      },
+      {
+        "number": 19,
+        "name": "L. Yamal",
+        "position": "FW",
+        "line": 4,
+        "slot": 1
+      },
+      {
+        "number": 10,
+        "name": "D. Olmo",
+        "position": "MF",
+        "line": 4,
+        "slot": 2
+      },
+      {
+        "number": 15,
+        "name": "A. Baena",
+        "position": "MF",
+        "line": 4,
+        "slot": 3
+      },
+      {
+        "number": 21,
+        "name": "M. Oyarzabal",
+        "position": "FW",
+        "line": 5,
+        "slot": 1
+      }
+    ]
+  },
+  "argentina": {
+    "team": "Argentina",
+    "formation": "4-4-2",
+    "players": [
+      {
+        "number": 23,
+        "name": "E. Martínez",
+        "position": "GK",
+        "line": 1,
+        "slot": 1
+      },
+      {
+        "number": 3,
+        "name": "N. Tagliafico",
+        "position": "DF",
+        "line": 2,
+        "slot": 1
+      },
+      {
+        "number": 6,
+        "name": "L. Martínez",
+        "position": "DF",
+        "line": 2,
+        "slot": 2
+      },
+      {
+        "number": 13,
+        "name": "C. Romero",
+        "position": "DF",
+        "line": 2,
+        "slot": 3
+      },
+      {
+        "number": 26,
+        "name": "N. Molina",
+        "position": "DF",
+        "line": 2,
+        "slot": 4
+      },
+      {
+        "number": 24,
+        "name": "E. Fernández",
+        "position": "MF",
+        "line": 3,
+        "slot": 1
+      },
+      {
+        "number": 20,
+        "name": "A. Mac Allister",
+        "position": "MF",
+        "line": 3,
+        "slot": 2
+      },
+      {
+        "number": 5,
+        "name": "L. Paredes",
+        "position": "MF",
+        "line": 3,
+        "slot": 3
+      },
+      {
+        "number": 17,
+        "name": "G. Simeone",
+        "position": "MF",
+        "line": 3,
+        "slot": 4
+      },
+      {
+        "number": 9,
+        "name": "J. Álvarez",
+        "position": "FW",
+        "line": 4,
+        "slot": 1
+      },
+      {
+        "number": 10,
+        "name": "L. Messi",
+        "position": "FW",
+        "line": 4,
+        "slot": 2
+      }
+    ]
+  }
+}
