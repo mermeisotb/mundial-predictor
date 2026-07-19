@@ -11,6 +11,7 @@ from model.h2h import calculate_h2h_probability
 from model.corners_cards import get_team_averages, predict_corners_cards
 from data.load_lineups import get_lineup
 from model.lineup_display import render_lineups_stacked
+import streamlit_merme_theme as merme_theme
 
 DB_PATH = "data/db.sqlite"
 
@@ -36,7 +37,7 @@ GOAL_MARKET_LINES = [1.5, 2.5, 3.5]
 CORNER_MARKET_LINES = [5.5, 7.5, 9.5]
 CARD_MARKET_LINES = [1.5, 2.5, 3.5]
 
-st.set_page_config(page_title="Mundial Predictor", page_icon="🏆", layout="wide")
+st.set_page_config(page_title="Mundial Predictor", page_icon="🏆", layout="wide",initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
@@ -69,10 +70,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-
-# ---------------------------------------------------------------------------
-# Helpers generales
-# ---------------------------------------------------------------------------
+merme_theme.apply()
 
 def run_query(sql, params=()):
     """Ejecuta un SELECT y devuelve las filas; [] si la tabla no existe o falla."""
