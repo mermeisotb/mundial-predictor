@@ -249,6 +249,8 @@ def render_advanced_insights(home, away, poisson_result):
     c3.metric("xG total esperado", eg["expected_total"])
     if not eg["has_real_xg"]:
         st.caption("Sin xG real cargado para este cruce todavía — usando solo el modelo Poisson.")
+    if poisson_result.get("lineup_notes"):
+        st.caption("⚠️ Ajustado por bajas confirmadas: " + " | ".join(poisson_result["lineup_notes"]))
     st.divider()
 
     with st.expander("🎲 Simulación Monte Carlo (10,000 partidos)"):
@@ -283,76 +285,88 @@ def render_advanced_insights(home, away, poisson_result):
                     """, unsafe_allow_html=True)
     st.divider()
 
-"""Muestra el estado actual de las cuotas cargadas en db.sqlite para un
-cruce, desglosado por casa de apuestas, con fecha de ultima actualizacion.
 
-Uso: py -3 data/check_odds_state.py Spain Argentina
-"""
-import sqlite3
-import sys
+def obtener_cuotas_mercado(home, away):
+    """Mejor cuota 1X2 disponible entre todas las casas cargadas para este cruce.
+    Devuelve (odd_home, odd_draw, odd_away, bookmaker) o (None, None, None, None)."""
+    rows = run_query("""
+        SELECT home_team, away_team, bookmaker, odd_home, odd_draw, odd_away
+        FROM match_odds
+        WHERE home_team IS NOT NULL AND away_team IS NOT NULL
+        ORDER BY last_update DESC
+    """)
+    home_normalizado = normalizar_equipo(home)
+    away_normalizado = normalizar_equipo(away)
+    candidatos = [
+        (bookmaker, odd_home, odd_draw, odd_away)
+        for odds_home, odds_away, bookmaker, odd_home, odd_draw, odd_away in rows
+        if normalizar_equipo(odds_home) == home_normalizado and normalizar_equipo(odds_away) == away_normalizado
+    ]
+    if not candidatos:
+        return None, None, None, None
 
-DB_PATH = "data/db.sqlite"
-
-
-def main():
-    if len(sys.argv) != 3:
-        print("Uso: py -3 data/check_odds_state.py <Local> <Visita>")
-        return
-
-    home, away = sys.argv[1], sys.argv[2]
-    conn = sqlite3.connect(DB_PATH)
-
-    print(f"\n=== match_odds (1X2) — {home} vs {away} ===")
-    for row in conn.execute(
-        "SELECT bookmaker, odd_home, odd_draw, odd_away, last_update FROM match_odds "
-        "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker",
-        (home, away),
-    ):
-        print(row)
-
-    for table, label in [("goals_odds", "Goles"), ("corners_odds", "Corners"), ("cards_odds", "Tarjetas")]:
-        print(f"\n=== {table} ({label}) — {home} vs {away} ===")
-        for row in conn.execute(
-            f"SELECT bookmaker, line, odd_over, odd_under, last_update FROM {table} "
-            "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker, line",
-            (home, away),
-        ):
-            print(row)
-
-    print(f"\n=== btts_odds — {home} vs {away} ===")
-    for row in conn.execute(
-        "SELECT bookmaker, odd_yes, odd_no, last_update FROM btts_odds "
-        "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker",
-        (home, away),
-    ):
-        print(row)
-
-    conn.close()
+    mejor_home = max(candidatos, key=lambda c: c[1])
+    mejor_draw = max(candidatos, key=lambda c: c[2])
+    mejor_away = max(candidatos, key=lambda c: c[3])
+    return mejor_home[1], mejor_draw[2], mejor_away[3], mejor_home[0]
 
 
-if __name__ == "__main__":
-    main()
-def get_market_odds(tabla, home, away):
-    """Devuelve todas las líneas over/under cargadas para un partido en una tabla dada."""
-    rows = run_query(f"""
-        SELECT line, odd_over, odd_under FROM {tabla}
+def get_all_market_odds(tabla, home, away):
+    """Todas las filas (todas las casas) para un mercado over/under."""
+    return run_query(f"""
+        SELECT bookmaker, line, odd_over, odd_under FROM {tabla}
         WHERE (home_team = ? AND away_team = ?) OR (home_team = ? AND away_team = ?)
-        ORDER BY line ASC
+        ORDER BY line ASC, bookmaker ASC
     """, (home, away, away, home))
-    return rows
+
+
+def get_best_market_odds_by_line(tabla, home, away):
+    """Para cada línea, la mejor cuota Over disponible entre casas.
+    Devuelve {line: (odd_over, bookmaker)}."""
+    rows = get_all_market_odds(tabla, home, away)
+    best = {}
+    for bookmaker, line, odd_over, odd_under in rows:
+        if odd_over is None:
+            continue
+        if line not in best or odd_over > best[line][0]:
+            best[line] = (odd_over, bookmaker)
+    return best
+
+
+def get_market_odds(tabla, home, away):
+    """Compatibilidad: devuelve (line, odd_over, odd_under) usando la mejor
+    cuota Over/Under por línea (sin distinguir casa), para el expander de
+    líneas adicionales."""
+    best = get_best_market_odds_by_line(tabla, home, away)
+    rows_all = get_all_market_odds(tabla, home, away)
+    under_by_line = {}
+    for bookmaker, line, odd_over, odd_under in rows_all:
+        if odd_under is not None and (line not in under_by_line or odd_under > under_by_line[line]):
+            under_by_line[line] = odd_under
+    return [(line, best[line][0], under_by_line.get(line)) for line in sorted(best)]
 
 
 def get_market_odds_by_line(tabla, home, away):
-    """Igual que get_market_odds pero indexado por línea, para lookup rápido."""
-    return {line: (odd_over, odd_under) for line, odd_over, odd_under in get_market_odds(tabla, home, away)}
+    """Igual que antes pero usando la mejor cuota entre casas: {line: (odd_over, odd_under)}."""
+    best_over = get_best_market_odds_by_line(tabla, home, away)
+    rows_all = get_all_market_odds(tabla, home, away)
+    under_by_line = {}
+    for bookmaker, line, odd_over, odd_under in rows_all:
+        if odd_under is not None and (line not in under_by_line or odd_under > under_by_line[line]):
+            under_by_line[line] = odd_under
+    return {line: (data[0], under_by_line.get(line)) for line, data in best_over.items()}
 
 
 def get_btts_odds(home, away):
+    """Mejor cuota 'Si' disponible entre casas. Devuelve (odd_yes, odd_no, bookmaker)."""
     rows = run_query("""
-        SELECT odd_yes, odd_no FROM btts_odds
+        SELECT bookmaker, odd_yes, odd_no FROM btts_odds
         WHERE (home_team = ? AND away_team = ?) OR (home_team = ? AND away_team = ?)
     """, (home, away, away, home))
-    return rows[0] if rows else (None, None)
+    if not rows:
+        return None, None, None
+    best = max(rows, key=lambda r: r[1] if r[1] else 0)
+    return best[1], best[2], best[0]
 
 
 def get_teams_with_players():
@@ -385,36 +399,9 @@ def get_active_teams():
 # Render: análisis de partido (usado por Predicciones)
 # ---------------------------------------------------------------------------
 
-def render_cuotas_mercado(home, away, prob_local, prob_empate, prob_visita,
-                           cuota_local, cuota_empate, cuota_visita, show_missing_message=True):
-    st.markdown("**Percepción del Mercado (Casas de Apuestas)**")
-
-    if not cuota_local:
-        if show_missing_message:
-            st.info("Las cuotas reales aún no están disponibles en la API para este partido.")
-            st.divider()
-        return
-
-    col1, col2, col3 = st.columns(3)
-    datos = [
-        (col1, f"🏠 {home} (Cuota: {cuota_local})", cuota_local, prob_local),
-        (col2, f"🤝 Empate (Cuota: {cuota_empate})", cuota_empate, prob_empate),
-        (col3, f"✈️ {away} (Cuota: {cuota_visita})", cuota_visita, prob_visita),
-    ]
-    for col, label, cuota, prob_modelo in datos:
-        prob_mercado = (1 / cuota) * 100
-        with col:
-            st.metric(
-                label=label,
-                value=f"{prob_mercado:.1f}%",
-                delta=f"{prob_modelo - prob_mercado:.1f}% vs Modelo",
-            )
-    st.divider()
-
-
 def render_odds_comparison(home, away, poisson_result):
     st.subheader("Cuotas: modelo vs mercado")
-    st.caption("La cuota teórica proviene del modelo Poisson; la cuota real se carga manualmente desde casas de apuestas (ej. Betano).")
+    st.caption("La cuota teórica proviene del modelo Poisson; la cuota real es la mejor disponible entre las casas cargadas (Betano, Epicbet, etc.).")
 
     real_home, real_draw, real_away, bookmaker_1x2 = obtener_cuotas_mercado(home, away)
     fair_odds = poisson_result["fair_odds"]
@@ -432,7 +419,7 @@ def render_odds_comparison(home, away, poisson_result):
                 st.metric(
                     label,
                     f"Teórica: {fair_odd:.2f}",
-                    delta=f"Real: {real_odd:.2f} ({difference:+.1f}% vs modelo)",
+                    delta=f"Real: {real_odd:.2f} ({difference:+.1f}% vs modelo) · {bookmaker_1x2}",
                 )
     st.divider()
 
@@ -463,7 +450,7 @@ def render_market_group(titulo, icono, items):
 
 def render_secondary_markets(home, away, poisson_result, corners_cards_result):
     st.subheader("Mercados")
-    st.caption("Líneas agrupadas por categoría. Edge = diferencia entre la probabilidad del modelo y la implícita en la cuota real.")
+    st.caption("Líneas agrupadas por categoría. Edge = diferencia entre la probabilidad del modelo y la implícita en la mejor cuota real disponible.")
 
     all_edges = []
 
@@ -669,9 +656,17 @@ def render_predictions_tab():
         for m in matches
     }
 
+    # España vs Argentina se preselecciona automáticamente si está disponible
+    # (Francia vs Inglaterra ya se jugó y pasa a "finalizados").
+    default_selection = [
+        label for label, m in match_labels.items()
+        if {normalizar_equipo(m[3]), normalizar_equipo(m[4])} == {"spain", "argentina"}
+    ]
+
     selected_labels = st.multiselect(
         "Selecciona los partidos a analizar:",
         options=list(match_labels.keys()),
+        default=default_selection,
         key="selector_partidos",
     )
 
