@@ -535,7 +535,7 @@ def render_secondary_markets(home, away, poisson_result, corners_cards_result):
 
 
 def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, show_odds_comparison=False):
-    header_col1, header_col2, header_col3 = st.columns([1, 3, 1])
+    header_col1, header_col2, header_col3, header_col4 = st.columns([1, 4, 1, 0.6])
     with header_col1:
         flag = team_flag_url(home)
         if flag:
@@ -546,22 +546,33 @@ def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, sh
         flag = team_flag_url(away)
         if flag:
             st.image(flag, width=60)
-        lineup_data = get_lineup(home, away)
-        if lineup_data:
-            if st.button("🏟️", key=f"lineups_btn_{match_id}", help="Ver alineaciones confirmadas"):
-                st.session_state[f"show_lineups_{match_id}"] = True
 
-    if lineup_data and st.session_state.get(f"show_lineups_{match_id}", False):
-        @st.dialog("Alineaciones", width="large")
+    lineup_data = get_lineup(home, away)
+    state_key = f"show_lineups_{match_id}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = False
+
+    with header_col4:
+        if lineup_data:
+            if st.button("📋", key=f"lineups_btn_{match_id}", help="Ver alineaciones confirmadas"):
+                st.session_state[state_key] = True
+
+    if lineup_data and st.session_state.get(state_key, False):
+        @st.dialog(f"📋 {home} vs {away}", width="large")
         def _lineups_dialog():
             render_lineups_stacked(
-                lineup_data[home], lineup_data[away],
-                home_color=team_color(home), away_color=team_color(away),
+                lineup_data[home],
+                lineup_data[away],
+                home,
+                away,
+                team_color(home),
+                team_color(away),
             )
-            if st.button("Cerrar"):
-                st.session_state[f"show_lineups_{match_id}"] = False
+            if st.button("Cerrar", key=f"close_lineups_{match_id}"):
+                st.session_state[state_key] = False
                 st.rerun()
         _lineups_dialog()
+
 
     col1, col2, col3 = st.columns(3)
 
@@ -700,10 +711,15 @@ def render_predictions_tab():
         if not selected_labels:
             st.info("Selecciona al menos un partido.")
             return
+        st.session_state["analisis_activo"] = selected_labels
+
+    if st.session_state.get("analisis_activo"):
         with st.spinner("Ejecutando modelos..."):
             elo_ratings = load_elo_ratings()
             corner_averages = load_corner_card_averages()
-            for label in selected_labels:
+            for label in st.session_state["analisis_activo"]:
+                if label not in match_labels:
+                    continue
                 match_id, _, stage, home, away, _ = match_labels[label]
                 is_definitoria = stage in ("final", "third")
                 render_match_analysis(

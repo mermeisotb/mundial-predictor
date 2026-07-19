@@ -1,0 +1,1277 @@
+1
+======================================================================
+RESUMEN DEL PROYECTO: mundial-predictor
+Ruta: C:\Users\matib\Desktop\Apps\mundial-predictor
+======================================================================
+
+# ESTRUCTURA DE DIRECTORIOS
+--------------------------------------------------
+mundial-predictor/
+├── .devcontainer
+│   └── devcontainer.json
+├── data
+│   ├── kaggle
+│   │   ├── match_prediction_features.csv
+│   │   ├── match_team_stats.csv
+│   │   ├── matches.csv
+│   │   ├── player_stats.csv
+│   │   └── squads_and_players.csv
+│   ├── lineups
+│   │   └── spain_argentina.json
+│   ├── manual_odds
+│   │   ├── france_england.csv
+│   │   ├── spain_argentina_betano.csv
+│   │   └── spain_argentina_epicbet.csv
+│   ├── check_odds_state.py
+│   ├── db.sqlite
+│   ├── fetch.py
+│   ├── fetch_odds.py
+│   ├── fetch_worldcup26.py
+│   ├── lineup_adjustments.py
+│   ├── load_historical.py
+│   ├── load_kaggle_matches.py
+│   ├── load_lineups.py
+│   ├── load_manual_odds.py
+│   ├── load_odds_generic.py
+│   ├── load_players.py
+│   └── reset_odds_tables.py
+├── model
+│   ├── corners_cards.py
+│   ├── elo.py
+│   ├── h2h.py
+│   ├── lineup_display.py
+│   ├── monte_carlo.py
+│   └── poisson_model.py
+├── .env
+├── .gitignore
+├── app.py
+├── check_corners_data.py
+├── check_db_state.py
+├── requirements.txt
+└── resumen_proyecto.py
+
+# CONTENIDO DE ARCHIVOS
+--------------------------------------------------
+
+## .devcontainer\devcontainer.json
+```python
+{
+  "name": "Python 3",
+  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bookworm",
+  "customizations": {
+    "codespaces": {
+      "openFiles": [
+        "README.md",
+        "app.py"
+      ]
+    },
+    "vscode": {
+      "settings": {},
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  },
+  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
+  "postAttachCommand": {
+    "server": "streamlit run app.py --server.enableCORS false --server.enableXsrfProtection false"
+  },
+  "portsAttributes": {
+    "8501": {
+      "label": "Application",
+      "onAutoForward": "openPreview"
+    }
+  },
+  "forwardPorts": [
+    8501
+  ]
+}
+```
+
+## .env
+```python
+FOOTBALL_DATA_KEY=6d13d6cb6f214e8fa6162bbd6f85867b
+API_FOOTBALL_KEY=fbec1240ed2aef31dc8807da60365e13
+ODDS_API_KEY=d81beb36c74923f52312f3e72a803d64
+WC26_EMAIL=matiben14mg.mg@gmail.com
+WC26_PASSWORD=Agil2304
+```
+
+## app.py
+```python
+import re
+import sqlite3
+from datetime import datetime
+from model.monte_carlo import simulate_match
+import pandas as pd
+import streamlit as st
+from streamlit_option_menu import option_menu
+from model.elo import calculate_elo_ratings
+from model.poisson_model import predict_match
+from model.h2h import calculate_h2h_probability
+from model.corners_cards import get_team_averages, predict_corners_cards
+from data.load_lineups import get_lineup
+from model.lineup_display import render_lineups_stacked
+
+DB_PATH = "data/db.sqlite"
+
+TEAM_CODES = {
+    "Argentina": "ar", "Brazil": "br", "France": "fr", "England": "gb-eng",
+    "Spain": "es", "Germany": "de", "Portugal": "pt", "Netherlands": "nl",
+    "Italy": "it", "Belgium": "be", "Uruguay": "uy", "Croatia": "hr",
+    "Morocco": "ma", "Colombia": "co", "Mexico": "mx", "United States": "us",
+    "Japan": "jp", "South Korea": "kr",
+}
+
+TEAM_COLORS = {
+    "Argentina": "#75AADB", "Brazil": "#FFDF00", "France": "#0055A4",
+    "England": "#CE1124", "Spain": "#C60B1E", "Germany": "#000000",
+    "Portugal": "#006600", "Netherlands": "#FF6600", "Italy": "#0066CC",
+    "Belgium": "#ED2939", "Uruguay": "#7B9ACC", "Croatia": "#FF0000",
+    "Morocco": "#C1272D", "Colombia": "#FCD116", "Mexico": "#006341",
+    "United States": "#3C3B6E", "Japan": "#BC002D", "South Korea": "#CD2E3A",
+}
+DEFAULT_COLOR = "#888888"
+
+GOAL_MARKET_LINES = [1.5, 2.5, 3.5]
+CORNER_MARKET_LINES = [5.5, 7.5, 9.5]
+CARD_MARKET_LINES = [1.5, 2.5, 3.5]
+
+st.set_page_config(page_title="Mundial Predictor", page_icon="🏆", layout="wide")
+
+st.markdown("""
+    <style>
+        /* Tipografía y espaciado general */
+        .main .block-container {
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+            max-width: 1200px;
+        }
+        h1, h2, h3 { font-weight: 700; letter-spacing: -0.3px; }
+        [data-testid="stMetricValue"] { font-size: 1.4rem; }
+        [data-testid="stMetricLabel"] { font-size: 0.82rem; opacity: 0.85; }
+
+        /* Tarjetas (containers con borde) */
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: 10px;
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        /* Sidebar */
+        section[data-testid="stSidebar"] { border-right: 1px solid rgba(255,255,255,0.08); }
+
+        /* Expanders más discretos */
+        details {
+            border-radius: 8px !important;
+            border: 1px solid rgba(255,255,255,0.08) !important;
+        }
+
+        hr { margin: 1.1rem 0; opacity: 0.15; }
+    </style>
+""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Helpers generales
+# ---------------------------------------------------------------------------
+
+def run_query(sql, params=()):
+    """Ejecuta un SELECT y devuelve las filas; [] si la tabla no existe o falla."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return rows
+    except sqlite3.OperationalError:
+        return []
+
+
+def team_flag_url(name):
+    code = TEAM_CODES.get(name)
+    return f"https://flagcdn.com/w80/{code}.png" if code else None
+
+
+def team_color(name):
+    return TEAM_COLORS.get(name, DEFAULT_COLOR)
+
+
+def calcular_cuota_justa(probabilidad_porcentaje):
+    """Convierte un porcentaje (ej: 47.2) en una cuota teórica (ej: 2.12)."""
+    try:
+        prob_decimal = probabilidad_porcentaje / 100.0
+        return f"{round(1 / prob_decimal, 2):.2f}" if prob_decimal > 0 else "N/A"
+    except ZeroDivisionError:
+        return "N/A"
+
+
+def normalizar_equipo(nombre):
+    """Normaliza nombres para relacionar las distintas fuentes de datos."""
+    aliases = {
+        "usa": "united states",
+        "united states of america": "united states",
+        "korea republic": "south korea",
+    }
+    nombre_normalizado = re.sub(r"[^a-z0-9 ]", "", nombre.lower()).strip()
+    return aliases.get(nombre_normalizado, nombre_normalizado)
+
+
+def custom_bar(label, pct, color):
+    st.markdown(f"""
+        <div style="margin-bottom: 8px;">
+            <div style="display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 2px;">
+                <span>{label}</span>
+                <span><b>{pct}%</b></span>
+            </div>
+            <div style="background-color: #333; border-radius: 4px; height: 10px;">
+                <div style="background-color: {color}; width: {pct}%; height: 10px; border-radius: 4px;"></div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+
+@st.cache_data
+def load_elo_ratings():
+    return calculate_elo_ratings()
+
+
+@st.cache_resource
+def load_corner_card_averages():
+    return get_team_averages()
+
+
+# ---------------------------------------------------------------------------
+# Acceso a datos
+# ---------------------------------------------------------------------------
+
+def get_prediction_features(home, away):
+    """Busca la fila de kaggle_match_prediction_features para este cruce (en cualquier orden)."""
+    rows = run_query("""
+        SELECT * FROM kaggle_match_prediction_features
+        WHERE (home_team_name = ? AND away_team_name = ?)
+           OR (home_team_name = ? AND away_team_name = ?)
+        ORDER BY date DESC LIMIT 1
+    """, (home, away, away, home))
+    if not rows:
+        return None
+
+    conn = sqlite3.connect(DB_PATH)
+    columns = [c[1] for c in conn.execute("PRAGMA table_info(kaggle_match_prediction_features)")]
+    conn.close()
+
+    data = dict(zip(columns, rows[0]))
+    swapped = data.get("home_team_name") != home
+
+    def num(key):
+        try:
+            return float(data.get(key))
+        except (TypeError, ValueError):
+            return None
+
+    def pick(local_key, visita_key):
+        return (num(visita_key), num(local_key)) if swapped else (num(local_key), num(visita_key))
+
+    return {
+        "fifa_rank": pick("home_fifa_rank", "away_fifa_rank"),
+        "elo_dataset": pick("home_elo", "away_elo"),
+        "squad_avg_age": pick("home_squad_avg_age", "away_squad_avg_age"),
+        "squad_total_caps": pick("home_squad_total_caps", "away_squad_total_caps"),
+        "squad_total_value": pick("home_squad_total_value_eur", "away_squad_total_value_eur"),
+        "rest_days": pick("home_rest_days", "away_rest_days"),
+        "prev_avg_goals_scored": pick("home_prev_avg_goals_scored", "away_prev_avg_goals_scored"),
+        "prev_avg_goals_conceded": pick("home_prev_avg_goals_conceded", "away_prev_avg_goals_conceded"),
+        "prev_avg_possession": pick("home_prev_avg_possession", "away_prev_avg_possession"),
+        "prev_avg_xg_scored": pick("home_prev_avg_xg_scored", "away_prev_avg_xg_scored"),
+    }
+
+
+def render_prediction_features(home, away):
+    features = get_prediction_features(home, away)
+    if not features:
+        return
+
+    with st.expander("📈 Datos avanzados (FIFA rank, Elo dataset, plantel y forma previa)"):
+        st.caption("Fuente: FIFA World Cup 2026 Dataset (Kaggle) — match_prediction_features.")
+        filas = [
+            ("Ranking FIFA", features["fifa_rank"], "{:.0f}"),
+            ("Elo (dataset)", features["elo_dataset"], "{:.0f}"),
+            ("Edad promedio plantel", features["squad_avg_age"], "{:.1f} años"),
+            ("Partidos internacionales (total)", features["squad_total_caps"], "{:.0f}"),
+            ("Valor total plantel", features["squad_total_value"], "€{:,.0f}"),
+            ("Días de descanso", features["rest_days"], "{:.0f}"),
+            ("Goles a favor prom. (previos)", features["prev_avg_goals_scored"], "{:.2f}"),
+            ("Goles en contra prom. (previos)", features["prev_avg_goals_conceded"], "{:.2f}"),
+            ("Posesión prom. (previos)", features["prev_avg_possession"], "{:.1f}%"),
+            ("xG a favor prom. (previos)", features["prev_avg_xg_scored"], "{:.2f}"),
+        ]
+        col_home, col_away = st.columns(2)
+        col_home.markdown(f"**{home}**")
+        col_away.markdown(f"**{away}**")
+        for label, (v_home, v_away), fmt in filas:
+            col_home.write(f"{label}: {fmt.format(v_home) if v_home is not None else '-'}")
+            col_away.write(f"{label}: {fmt.format(v_away) if v_away is not None else '-'}")
+
+
+def get_matches_for_analysis(include_finished=False):
+    filtro_estado = "" if include_finished else "finished != 'TRUE' AND"
+    return run_query(f"""
+        SELECT id, local_date, stage, home_team, away_team, finished
+        FROM worldcup26_matches
+        WHERE {filtro_estado}
+          home_team IS NOT NULL AND home_team != 'None' AND home_team != ''
+          AND away_team IS NOT NULL AND away_team != 'None' AND away_team != ''
+        ORDER BY local_date DESC
+    """)
+
+
+def get_pending_worldcup26_matches():
+    """Cuenta partidos futuros cuyos equipos aún no están definidos."""
+    rows = run_query("""
+        SELECT COUNT(*) FROM worldcup26_matches
+        WHERE finished != 'TRUE' AND (home_team IS NULL OR away_team IS NULL)
+    """)
+    return rows[0][0] if rows else 0
+
+
+def get_worldcup26_results():
+    return run_query("""
+        SELECT home_team, away_team, home_score, away_score, group_name, stage, local_date, finished
+        FROM worldcup26_matches
+        WHERE finished = 'TRUE'
+        ORDER BY local_date DESC
+    """)
+
+
+def render_advanced_insights(home, away, poisson_result):
+    st.markdown("**⚡ Expected Goals (xG)**")
+    eg = poisson_result["expected_goals"]
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"xG {home}", eg["expected_home"],
+               delta=f"Poisson {eg['poisson_home']}" + (f" / real {eg['xg_home']}" if eg["xg_home"] else ""))
+    c2.metric(f"xG {away}", eg["expected_away"],
+               delta=f"Poisson {eg['poisson_away']}" + (f" / real {eg['xg_away']}" if eg["xg_away"] else ""))
+    c3.metric("xG total esperado", eg["expected_total"])
+    if not eg["has_real_xg"]:
+        st.caption("Sin xG real cargado para este cruce todavía — usando solo el modelo Poisson.")
+    if poisson_result.get("lineup_notes"):
+        st.caption("⚠️ Ajustado por bajas confirmadas: " + " | ".join(poisson_result["lineup_notes"]))
+    st.divider()
+
+    with st.expander("🎲 Simulación Monte Carlo (10,000 partidos)"):
+        mc = simulate_match(home, away)
+        if mc is None:
+            st.info("Sin datos suficientes para simular este cruce.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f"Gana {home}", f"{mc['home_win_prob']}%")
+            c2.metric("Empate", f"{mc['draw_prob']}%")
+            c3.metric(f"Gana {away}", f"{mc['away_win_prob']}%")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Más de 1.5 goles", f"{mc['over_1_5_prob']}%")
+            c2.metric("Más de 2.5 goles", f"{mc['over_2_5_prob']}%")
+            c3.metric("Más de 3.5 goles", f"{mc['over_3_5_prob']}%")
+
+            st.caption(
+                f"Promedio de goles totales: {mc['avg_total_goals']} "
+                f"(rango p10-p90: {mc['goals_p10']}-{mc['goals_p90']})"
+            )
+
+            st.markdown("**Marcadores más frecuentes en la simulación**")
+            score_cols = st.columns(5)
+            for col, (score, prob) in zip(score_cols, mc["top_scores"]):
+                with col:
+                    st.markdown(f"""
+                        <div style="text-align: center;">
+                            <div style="font-size: 16px; color: #AAAAAA;">{prob}%</div>
+                            <div style="font-size: 26px; font-weight: 700;">{score[0]}-{score[1]}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+    st.divider()
+
+
+def obtener_cuotas_mercado(home, away):
+    """Mejor cuota 1X2 disponible entre todas las casas cargadas para este cruce.
+    Devuelve (odd_home, odd_draw, odd_away, bookmaker) o (None, None, None, None)."""
+    rows = run_query("""
+        SELECT home_team, away_team, bookmaker, odd_home, odd_draw, odd_away
+        FROM match_odds
+        WHERE home_team IS NOT NULL AND away_team IS NOT NULL
+        ORDER BY last_update DESC
+    """)
+    home_normalizado = normalizar_equipo(home)
+
+
+# ... (555 líneas más truncadas)
+```
+
+## check_corners_data.py
+```python
+import sqlite3
+
+conn = sqlite3.connect("data/db.sqlite")
+
+print("--- kaggle_match_team_stats para France/England ---")
+rows = conn.execute("""
+    SELECT team_name, corners FROM kaggle_match_team_stats
+    WHERE team_name IN ('France', 'England')
+""").fetchall()
+for r in rows:
+    print(r)
+
+print("\n--- players: tarjetas para France/England ---")
+rows2 = conn.execute("""
+    SELECT team_name, SUM(yellow_cards), SUM(matches_played)
+    FROM players WHERE team_name IN ('France', 'England')
+    GROUP BY team_name
+""").fetchall()
+for r in rows2:
+    print(r)
+
+conn.close()
+```
+
+## check_db_state.py
+```python
+import sqlite3
+
+conn = sqlite3.connect("data/db.sqlite")
+
+def contar(tabla, condicion=""):
+    try:
+        q = f"SELECT COUNT(*) FROM {tabla}"
+        if condicion:
+            q += f" WHERE {condicion}"
+        return conn.execute(q).fetchone()[0]
+    except sqlite3.OperationalError as e:
+        return f"ERROR: {e}"
+
+print("worldcup26_matches (total):", contar("worldcup26_matches"))
+print("worldcup26_matches (finalizados):", contar("worldcup26_matches", "finished = 'TRUE'"))
+print("worldcup26_matches (final/third):", contar("worldcup26_matches", "stage IN ('final','third')"))
+print("players:", contar("players"))
+print("kaggle_matches:", contar("kaggle_matches"))
+print("historical_matches:", contar("historical_matches"))
+
+conn.close()
+```
+
+## data\check_odds_state.py
+```python
+"""Muestra el estado actual de las cuotas cargadas en db.sqlite para un
+cruce, desglosado por casa de apuestas, con fecha de ultima actualizacion.
+
+Uso: py -3 data/check_odds_state.py Spain Argentina
+"""
+import sqlite3
+import sys
+
+DB_PATH = "data/db.sqlite"
+
+
+def main():
+    if len(sys.argv) != 3:
+        print("Uso: py -3 data/check_odds_state.py <Local> <Visita>")
+        return
+
+    home, away = sys.argv[1], sys.argv[2]
+    conn = sqlite3.connect(DB_PATH)
+
+    print(f"\n=== match_odds (1X2) — {home} vs {away} ===")
+    for row in conn.execute(
+        "SELECT bookmaker, odd_home, odd_draw, odd_away, last_update FROM match_odds "
+        "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker",
+        (home, away),
+    ):
+        print(row)
+
+    for table, label in [("goals_odds", "Goles"), ("corners_odds", "Corners"), ("cards_odds", "Tarjetas")]:
+        print(f"\n=== {table} ({label}) — {home} vs {away} ===")
+        for row in conn.execute(
+            f"SELECT bookmaker, line, odd_over, odd_under, last_update FROM {table} "
+            "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker, line",
+            (home, away),
+        ):
+            print(row)
+
+    print(f"\n=== btts_odds — {home} vs {away} ===")
+    for row in conn.execute(
+        "SELECT bookmaker, odd_yes, odd_no, last_update FROM btts_odds "
+        "WHERE home_team = ? AND away_team = ? ORDER BY bookmaker",
+        (home, away),
+    ):
+        print(row)
+
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## data\fetch.py
+```python
+import os
+import sqlite3
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Usamos tu clave gratuita original de football-data.org
+FOOTBALL_DATA_KEY = os.getenv("FOOTBALL_DATA_KEY")
+FOOTBALL_DATA_BASE = "https://api.football-data.org/v4"
+DB_PATH = "data/db.sqlite"
+
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+
+def get_world_cup_matches():
+    """Trae los partidos de la Copa del Mundo desde la API gratuita."""
+    headers = {"X-Auth-Token": FOOTBALL_DATA_KEY}
+    url = f"{FOOTBALL_DATA_BASE}/competitions/WC/matches"
+    
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            print(f"❌ Error {response.status_code} al conectar con Football-Data: {response.text}")
+            return None
+        return response.json()
+    except Exception as e:
+        print(f"❌ Error de conexión: {e}")
+        return None
+
+
+def init_db():
+    """Crea la tabla asegurando que existan las columnas de cuotas (vacías)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # Reiniciamos la tabla para aplicar el esquema de forma limpia
+    cursor.execute("DROP TABLE IF EXISTS matches")
+    cursor.execute("""
+        CREATE TABLE matches (
+            id INTEGER PRIMARY KEY,
+            utc_date TEXT,
+            stage TEXT,
+            status TEXT,
+            home_team TEXT,
+            away_team TEXT,
+            home_score INTEGER,
+            away_score INTEGER,
+            odd_home REAL,
+            odd_draw REAL,
+            odd_away REAL
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def save_matches(matches):
+    """Guarda los partidos reales y deja las cuotas listas en None para la app."""
+    conn = init_db()
+    cursor = conn.cursor()
+
+    saved_count = 0
+    for m in matches:
+        home = m.get("homeTeam", {}).get("name")
+        away = m.get("awayTeam", {}).get("name")
+
+        # Filtro de seguridad para evitar partidos vacíos de rondas no definidas
+        if not home or not away or home == "None" or away == "None":
+            continue
+
+        home_score = m["score"]["fullTime"]["home"]
+        away_score = m["score"]["fullTime"]["away"]
+
+        # Insertamos los partidos reales y configuramos las cuotas como NULL de forma segura
+        cursor.execute("""
+            INSERT OR REPLACE INTO matches
+            (id, utc_date, stage, status, home_team, away_team, home_score, away_score, odd_home, odd_draw, odd_away)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+        """, (
+            m["id"], m["utcDate"], m["stage"], m["status"],
+            home, away, home_score, away_score
+        ))
+        saved_count += 1
+
+    conn.commit()
+    conn.close()
+    print(f"✅ ¡Éxito! {saved_count} partidos reales guardados en {DB_PATH} (cuotas listas en None).")
+
+
+if __name__ == "__main__":
+    print("Trayendo partidos del Mundial usando la API gratuita (football-data.org)...")
+    data = get_world_cup_matches()
+
+    if data:
+        matches = data.get("matches", [])
+        save_matches(matches)
+
+        finished = [m for m in matches if m["status"] == "FINISHED"]
+        upcoming = [m for m in matches if m["status"] in ("SCHEDULED", "TIMED")]
+        print(f"⚽ Sincronizados -> Finalizados: {len(finished)} | Próximos: {len(upcoming)}")
+    else:
+        print("❌ Sincronización fallida. Verifica la clave FOOTBALL_DATA_KEY en tu archivo .env")
+```
+
+## data\fetch_odds.py
+```python
+import os
+import sqlite3
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+DB_PATH = "data/db.sqlite"
+SPORT = "soccer_fifa_world_cup"
+REGIONS = "eu"
+MARKETS = "h2h"
+
+
+def init_odds_table():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    columns = cursor.execute("PRAGMA table_info(match_odds)").fetchall()
+
+    # The Odds API uses string IDs, while an earlier version of this script
+    # created this column as INTEGER PRIMARY KEY. Rebuild it once if needed.
+    if columns and columns[0][2].upper() != "TEXT":
+        cursor.execute("ALTER TABLE match_odds RENAME TO match_odds_old")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS match_odds (
+            match_id TEXT PRIMARY KEY,
+            bookmaker TEXT,
+            home_team TEXT,
+            away_team TEXT,
+            odd_home REAL,
+            odd_draw REAL,
+            odd_away REAL,
+            last_update TEXT,
+            commence_time TEXT
+        )
+    """)
+
+    existing_columns = {column[1] for column in cursor.execute("PRAGMA table_info(match_odds)")}
+    for column in ("home_team", "away_team", "commence_time"):
+        if column not in existing_columns:
+            cursor.execute(f"ALTER TABLE match_odds ADD COLUMN {column} TEXT")
+
+    if columns and columns[0][2].upper() != "TEXT":
+        cursor.execute("""
+            INSERT INTO match_odds
+            (match_id, bookmaker, odd_home, odd_draw, odd_away, last_update)
+            SELECT CAST(match_id AS TEXT), bookmaker, odd_home, odd_draw, odd_away, last_update
+            FROM match_odds_old
+        """)
+        cursor.execute("DROP TABLE match_odds_old")
+
+    conn.commit()
+    conn.close()
+
+
+def save_odds(match_id, bookmaker, home_team, away_team, home, draw, away, updated, commence_time):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO match_odds
+        (match_id, bookmaker, home_team, away_team, odd_home, odd_draw, odd_away, last_update, commence_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (match_id, bookmaker, home_team, away_team, home, draw, away, updated, commence_time))
+    conn.commit()
+    conn.close()
+
+
+def main():
+    if not ODDS_API_KEY:
+        raise RuntimeError("Falta definir ODDS_API_KEY en el archivo .env")
+
+    init_odds_table()
+    url = (
+        f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds"
+        f"?apiKey={ODDS_API_KEY}&regions={REGIONS}&markets={MARKETS}"
+    )
+    response = requests.get(url, timeout=30)
+    print("Status:", response.status_code)
+    response.raise_for_status()
+
+    matches = response.json()
+    print(f"Partidos encontrados: {len(matches)}")
+
+    for match in matches:
+        bookmakers = match.get("bookmakers", [])
+        if not bookmakers:
+            print(f'Sin cuotas disponibles para {match["home_team"]} vs {match["away_team"]}')
+            continue
+
+        bookmaker = bookmakers[0]
+        market = next(
+            (m for m in bookmaker.get("markets", []) if m["key"] == "h2h"),
+            None,
+        )
+        if market is None:
+            print(f'Sin mercado h2h para {match["home_team"]} vs {match["away_team"]}')
+            continue
+
+        odds = {}
+        for outcome in market["outcomes"]:
+            if outcome["name"] == match["home_team"]:
+                odds["home"] = outcome["price"]
+            elif outcome["name"] == match["away_team"]:
+                odds["away"] = outcome["price"]
+            else:
+                odds["draw"] = outcome["price"]
+
+        if not {"home", "draw", "away"}.issubset(odds):
+            print(f'Cuotas incompletas para {match["home_team"]} vs {match["away_team"]}')
+            continue
+
+        save_odds(
+            match["id"],
+            bookmaker["title"],
+            match["home_team"],
+            match["away_team"],
+            odds["home"],
+            odds["draw"],
+            odds["away"],
+            bookmaker.get("last_update", match["commence_time"]),
+            match["commence_time"],
+        )
+        print(f'✓ {match["home_team"]} vs {match["away_team"]} guardado')
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## data\fetch_worldcup26.py
+```python
+import requests
+import os
+import sqlite3
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BASE_URL = "https://worldcup26.ir"
+DB_PATH = "data/db.sqlite"
+
+
+def register_or_login():
+    """Registra el usuario (una sola vez) o loguea si ya existe. Devuelve el token JWT."""
+    email = os.getenv("WC26_EMAIL")
+    password = os.getenv("WC26_PASSWORD")
+
+    resp = requests.post(f"{BASE_URL}/auth/authenticate", json={
+        "email": email,
+        "password": password
+    })
+    if resp.status_code == 200:
+        return resp.json()["token"]
+
+    resp = requests.post(f"{BASE_URL}/auth/register", json={
+        "name": "mundial-predictor",
+        "email": email,
+        "password": password
+    })
+    if resp.status_code == 200:
+        return resp.json()["token"]
+
+    print(f"Error: {resp.status_code} - {resp.text}")
+    return None
+
+
+def get_matches(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(f"{BASE_URL}/get/games", headers=headers)
+    if resp.status_code == 200:
+        return resp.json().get("games", [])
+    print(f"Error trayendo partidos: {resp.status_code} - {resp.text}")
+    return []
+
+
+def save_matches(matches):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS worldcup26_matches (
+            id TEXT PRIMARY KEY,
+            home_team TEXT,
+            away_team TEXT,
+            home_score INTEGER,
+            away_score INTEGER,
+            group_name TEXT,
+            matchday TEXT,
+            local_date TEXT,
+            stadium_id TEXT,
+            finished TEXT,
+            stage TEXT
+        )
+    """)
+    for m in matches:
+        cursor.execute("""
+            INSERT OR REPLACE INTO worldcup26_matches
+            (id, home_team, away_team, home_score, away_score, group_name, matchday, local_date, stadium_id, finished, stage)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            m.get("id"),
+            m.get("home_team_name_en"),
+            m.get("away_team_name_en"),
+            m.get("home_score"),
+            m.get("away_score"),
+            m.get("group"),
+            m.get("matchday"),
+            m.get("local_date"),
+            m.get("stadium_id"),
+            m.get("finished"),
+            m.get("type"),
+        ))
+    conn.commit()
+    conn.close()
+    print(f"{len(matches)} partidos guardados en la base de datos.")
+
+
+if __name__ == "__main__":
+    token = register_or_login()
+    if token:
+        print("Token obtenido correctamente.")
+        matches = get_matches(token)
+        print(f"Se encontraron {len(matches)} partidos.")
+        save_matches(matches)
+    else:
+        print("No se pudo obtener el token.")
+```
+
+## data\kaggle\match_prediction_features.csv
+```python
+match_id,date,kickoff_time_utc,stage_id,is_knockout,home_team_id,home_team_name,home_fifa_code,home_confederation,away_team_id,away_team_name,away_fifa_code,away_confederation,venue_id,stadium_name,venue_city,venue_country,venue_capacity,venue_elevation_meters,referee_id,referee_name,referee_avg_cards,home_fifa_rank,away_fifa_rank,home_elo,away_elo,home_is_host,away_is_host,home_squad_avg_age,away_squad_avg_age,home_squad_total_caps,away_squad_total_caps,home_squad_total_value_eur,away_squad_total_value_eur,home_squad_avg_value_eur,away_squad_avg_value_eur,home_rest_days,away_rest_days,home_prev_avg_goals_scored,home_prev_avg_goals_conceded,away_prev_avg_goals_scored,away_prev_avg_goals_conceded,home_prev_avg_possession,away_prev_avg_possession,home_prev_avg_shots,away_prev_avg_shots,home_prev_avg_shots_on_target,away_prev_avg_shots_on_target,home_prev_avg_saves,away_prev_avg_saves,home_prev_avg_corners,away_prev_avg_corners,home_prev_avg_fouls,away_prev_avg_fouls,home_prev_avg_offsides,away_prev_avg_offsides,home_prev_avg_xg_scored,home_prev_avg_xg_conceded,away_prev_avg_xg_scored,away_prev_avg_xg_conceded,home_score,away_score,result_type,home_xg,away_xg,match_result
+1,2026-06-11,19:00,1,0,1,Mexico,MEX,CONCACAF,2,South Africa,RSA,CAF,1,Mexico City Stadium (Estadio Azteca),Mexico City,MEX,80824,2200.0,1,Szymon Marciniak,4.2,14,60,1810.0,1620.0,1,0,27.900700257989794,26.808403095877427,1237,538,411906509.0,47700000.0,15842558.038461538,1834615.3846153845,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,2,0,Regular,1.84,0.52,H
+2,2026-06-11,23:00,1,0,3,South Korea,KOR,AFC,4,Czechia,CZE,UEFA,7,Guadalajara Stadium (Estadio Akron),Zapopan,MEX,48070,1566.0,2,Daniele Orsato,4.8,22,40,1800.0,1740.0,0,0,28.065708418891173,27.620807665982205,974,738,139050000.0,187141830.0,5348076.923076923,7197762.692307692,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,2,1,Regular,1.45,1.12,H
+3,2026-06-12,19:00,1,0,5,Canada,CAN,CONCACAF,6,Bosnia and Herzegovina,BIH,UEFA,6,Toronto Stadium (BMO Field),Toronto,CAN,30000,76.0,3,Michael Oliver,3.9,33,64,1795.0,1645.0,1,0,26.972674143105355,26.456483967777597,973,613,204233523.0,146400000.0,7855135.5,5630769.230769231,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,1,Regular,1.35,0.98,D
+4,2026-06-12,23:00,1,0,13,USA,USA,CONCACAF,14,Paraguay,PAR,CONMEBOL,3,Los Angeles Stadium (SoFi Stadium),Inglewood,USA,70240,30.0,4,Anthony Taylor,4.1,17,54,1850.0,1725.0,1,0,26.904964987100513,29.002579897857103,977,705,378812045.0,135683726.0,14569694.038461538,5218604.846153846,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,4,1,Regular,2.76,0.88,H
+5,2026-06-13,15:00,1,0,7,Qatar,QAT,AFC,8,Switzerland,SUI,UEFA,10,Boston Stadium (Gillette Stadium),Foxborough,USA,65878,87.0,5,Clément Turpin,3.6,56,19,1600.0,1860.0,0,0,29.50771336808298,28.307060495972202,1586,1148,121299976.0,357184518.0,4665383.692307692,13737866.076923076,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,1,Regular,0.78,1.54,D
+6,2026-06-13,18:00,1,0,9,Brazil,BRA,CONMEBOL,10,Morocco,MAR,CAF,2,New York New Jersey Stadium (MetLife Stadium),East Rutherford,USA,82500,7.0,6,Danny Makkelie,3.8,6,7,2030.0,1920.0,0,0,29.36302848417838,26.598957510661826,932,723,893232413.0,456754154.0,34355092.807692304,17567467.46153846,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,1,Regular,1.62,1.1,D
+7,2026-06-13,21:00,1,0,11,Haiti,HAI,CONCACAF,12,Scotland,SCO,UEFA,14,Philadelphia Stadium (Lincoln Financial Field),Philadelphia,USA,69796,3.0,7,Jesús Valenzuela,4.9,83,39,1530.0,1720.0,0,0,27.508134575896385,29.202443005317754,643,989,61329838.0,125095414.0,2358839.923076923,4811362.076923077,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,0,1,Regular,1.25,0.65,A
+8,2026-06-13,23:59,1,0,15,Australia,AUS,AFC,16,Türkiye,TUR,UEFA,16,Seattle Stadium (Lumen Field),Seattle,USA,69000,3.0,8,Wilton Sampaio,4.5,27,26,1790.0,1780.0,0,0,27.359448217764445,27.67219501921761,751,989,80038893.0,461171375.0,3078418.9615384615,17737360.576923076,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,2,0,Regular,1.48,0.72,H
+9,2026-06-14,15:00,1,0,17,Germany,GER,UEFA,18,Curaçao,CUW,CONCACAF,9,Atlanta Stadium (Mercedes-Benz Stadium),Atlanta,USA,71000,318.0,9,César Arturo Ramos,4.0,10,82,1970.0,1520.0,0,0,28.04675406728795,28.0209550887169,860,635,988741629.0,40068087.0,38028524.192307696,1541080.2692307692,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,7,1,Regular,4.82,0.44,H
+10,2026-06-14,18:00,1,0,21,Netherlands,NED,UEFA,22,Japan,JPN,AFC,15,San Francisco Bay Area Stadium (Levi's Stadium),Santa Clara,USA,68500,8.0,10,Ivan Barton,5.1,8,18,1980.0,1880.0,0,0,27.77444321592166,27.49518243563418,877,823,765217546.0,270850000.0,29431444.076923076,10417307.692307692,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,2,2,Regular,1.95,1.82,D
+11,2026-06-14,21:00,1,0,19,Côte d'Ivoire,CIV,CAF,20,Ecuador,ECU,CONMEBOL,11,Houston Stadium (NRG Stadium),Houston,USA,72220,14.0,11,Mustapha Ghorbal,3.7,38,23,1750.0,1870.0,0,0,25.848996998894332,26.07760753961986,722,785,494766342.0,258787288.0,19029474.692307692,9953357.23076923,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,0,Regular,1.1,0.95,H
+12,2026-06-14,23:59,1,0,23,Sweden,SWE,UEFA,24,Tunisia,TUN,CAF,12,Kansas City Stadium (Arrowhead Stadium),Kansas City,USA,76416,264.0,12,Victor Gomes,4.3,25,45,1815.0,1710.0,0,0,27.557099984204708,26.644658558416264,531,596,408522445.0,78914514.0,15712401.73076923,3035173.6153846155,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,5,1,Regular,3.12,0.78,H
+13,2026-06-15,15:00,1,0,29,Spain,ESP,UEFA,30,Cabo Verde,CPV,CAF,13,Miami Stadium (Hard Rock Stadium),Miami Gardens,USA,64767,2.0,13,Ma Ning,5.5,2,67,2120.0,1640.0,0,0,26.747433264887068,29.676407097351653,758,841,2134173029.0,95326451.0,82083578.03846154,3666401.9615384615,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,0,0,Regular,2.15,0.35,D
+14,2026-06-15,18:00,1,0,25,Belgium,BEL,UEFA,26,Egypt,EGY,CAF,4,Dallas Stadium (AT&T Stadium),Arlington,USA,80000,184.0,14,Alireza Faghani,4.2,9,36,1950.0,1730.0,0,0,27.614489548781133,29.058916442900006,1101,847,634065971.0,197591799.0,24387152.730769232,7599684.576923077,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,1,Regular,1.58,1.12,D
+15,2026-06-15,21:00,1,0,31,Saudi Arabia,KSA,AFC,32,Uruguay,URU,CONMEBOL,8,Monterrey Stadium (Estadio BBVA),Guadalupe,MEX,53500,538.0,15,Yoshimi Yamashita,3.4,58,16,1660.0,1960.0,0,0,28.516084873374396,28.74227346917286,943,943,129541211.0,320346330.0,4982354.269230769,12321012.692307692,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,1,Regular,0.85,1.76,D
+16,2026-06-15,23:59,1,0,27,IR Iran,IRN,AFC,28,New Zealand,NZL,OFC,5,Vancouver Stadium (BC Place),Vancouver,CAN,54500,9.0,16,Facundo Tello,5.0,20,85,1820.0,1510.0,0,0,30.3325435686832,28.26704575369873,1191,848,145435820.0,37905696.0,5593685.384615385,1457911.3846153845,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,2,2,Regular,1.88,1.2,D
+17,2026-06-16,15:00,1,0,33,France,FRA,UEFA,34,Senegal,SEN,CAF,2,New York New Jersey Stadium (MetLife Stadium),East Rutherford,USA,82500,7.0,1,Szymon Marciniak,4.2,3,15,2100.0,1840.0,0,0,27.001000368556838,27.087242668351504,816,1032,1546204469.0,456345117.0,59469402.65384615,17551735.269230768,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,3,1,Regular,2.44,1.05,H
+18,2026-06-16,18:00,1,0,35,Iraq,IRQ,AFC,36,Norway,NOR,UEFA,10,Boston Stadium (Gillette Stadium),Foxborough,USA,65878,87.0,2,Daniele Orsato,4.8,55,44,1630.0,1775.0,0,0,26.91475806876218,26.804191017743374,845,817,123868581.0,465149822.0,4764176.192307692,17890377.769230768,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,4,Regular,0.68,2.85,A
+19,2026-06-16,21:00,1,0,37,Argentina,ARG,CONMEBOL,38,Algeria,ALG,CAF,3,Los Angeles Stadium (SoFi Stadium),Inglewood,USA,70240,30.0,3,Michael Oliver,3.9,1,28,2150.0,1760.0,0,0,29.11820144263676,26.85736850418575,1267,793,1025039444.0,229140860.0,39424594.0,8813110.0,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,3,0,Regular,2.65,0.42,H
+20,2026-06-16,23:59,1,0,39,Austria,AUT,UEFA,40,Jordan,JOR,AFC,15,San Francisco Bay Area Stadium (Levi's Stadium),Santa Clara,USA,68500,8.0,4,Anthony Taylor,4.1,24,63,1830.0,1610.0,0,0,28.61148844311062,28.46553993576581,1020,1079,243918243.0,104311966.0,9381470.884615384,4011998.6923076925,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,3,1,Regular,1.98,0.88,H
+21,2026-06-17,15:00,1,0,41,Portugal,POR,UEFA,42,Congo DR,COD,CAF,9,Atlanta Stadium (Mercedes-Benz Stadium),Atlanta,USA,71000,318.0,5,Clément Turpin,3.6,5,61,2010.0,1670.0,0,0,28.035276154372664,29.06870952456168,1176,806,1145908765.0,153037838.0,44073414.038461536,5886070.692307692,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,1,Regular,1.78,1.15,D
+22,2026-06-17,18:00,1,0,45,England,ENG,UEFA,46,Croatia,CRO,UEFA,13,Miami Stadium (Hard Rock Stadium),Miami Gardens,USA,64767,2.0,6,Danny Makkelie,3.8,4,11,2050.0,1940.0,0,0,27.273205917969776,28.32875269836256,853,1176,1321818896.0,387300000.0,50839188.307692304,14896153.846153846,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,4,2,Regular,2.92,1.64,H
+23,2026-06-17,21:00,1,0,47,Ghana,GHA,CAF,48,Panama,PAN,CONCACAF,11,Houston Stadium (NRG Stadium),Houston,USA,72220,14.0,7,Jesús Valenzuela,4.9,49,34,1690.0,1680.0,0,0,26.975201389985788,30.426578213025852,585,1556,198837737.0,174127946.0,7647605.269230769,6697228.692307692,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,0,Regular,1.3,0.75,H
+24,2026-06-17,23:59,1,0,43,Uzbekistan,UZB,AFC,44,Colombia,COL,CONMEBOL,16,Seattle Stadium (Lumen Field),Seattle,USA,69000,3.0,8,Wilton Sampaio,4.5,50,13,1650.0,1990.0,0,0,28.21323645553625,30.089296056441846,972,1059,85125000.0,460943359.0,3274038.4615384615,17728590.730769232,10.0,10.0,0.0,0.0,0.0,0.0,50.0,50.0,12.0,12.0,4.0,4.0,3.0,3.0,5.0,5.0,12.0,12.0,2.0,2.0,1.3,1.3,1.3,1.3,1,3,Regular,0.95,2.1,A
+25,2026-06-18,15:00,1,0,1,Mexico,MEX,CONCACAF,3,South Korea,KOR,AFC,9,Atlanta Stadium (Mercedes-Benz Stadium),Atlanta,USA,71000,318.0,9,César Arturo Ramos,4.0,14,22,1810.0,1800.0,0,0,27.900700257989794,28.065708418891173,1237,974,411906509.0,139050000.0,15842558.038461538,5348076.923076923,7,7,2.0,0.0,2.0,1.0,57.0,54.0,16.0,12.0,4.0,5.0,1.0,2.0,6.0,4.0,11.0,10.0,2.0,1.0,1.84,0.52,1.45,1.12,1,0,Regular,1.62,0.58,H
+26,2026-06-18,18:00,1,0,4,Czechia,CZE,UEFA,2,South Africa,RSA,CAF,3,Los Angeles Stadium (SoFi Stadium),Inglewood,USA,70240,30.0,10,Ivan Barton,5.1,40,60,1740.0,1620.0,0,0,27.620807665982205,26.808403095877427,738,538,187141830.0,47700000.0,7197762.692307692,1834615.3846153845,7,7,1.0,2.0,0.0,2.0,46.0,43.0,10.0,3.0,3.0,2.0,4.0,4.0,3.0,3.0,13.0,15.0,2.0,1.0,1.12,1.45,0.52,1.84,1,1,Regular,1.35,1.15,D
+27,2026-06-18,21:00,1,0,5,Canada,CAN,CONCACAF,7,Qatar,QAT,AFC,5,Vancouver Stadium (BC Place),Vancouver,CAN,54500,9.0,11,Mustapha Ghorbal,3.7,33,56,1795.0,1600.0,1,0,26.972674143105355,29.50771336808298,973,1586,204233523.0,121299976.0,7855135.5,4665383.692307692,6,5,1.0,1.0,1.0,1.0,52.0,28.0,13.0,6.0,4.0,3.0,3.0,4.0,9.0,3.0,12.0,12.0,2.0,1.0,1.35,0.98,0.78,1.54,6,0,Regular,3.82,0.22,H
+28,2026-06-18,23:59,1,0,8,Switzerland,SUI,UEFA,6,Bosnia and Herzegovina,BIH,UEFA,1,Mexico City Stadium (Estadio Azteca),Mexico City,MEX,80824,2200.0,12,Victor Gomes,4.3,19,64,1860.0,1645.0,0,0,28.307060495972202,26.456483967777597,1148,613,357184518.0,146400000.0,13737866.076923076,5630769.230769231,5,6,1.0,1.0,1.0,1.0,58.0,29.0,26.0,8.0,7.0,3.0,2.0,5.0,10.0,4.0,11.0,15.0,0.0,1.0,1.54,0.78,0.98,1.35,4,1,Regular,2.45,0.88,H
+29,2026-06-19,15:00,1,0,9,Brazil,BRA,CONMEBOL,11,Haiti,HAI,CONCACAF,2,New York New Jersey Stadium (MetLife Stadium),East Rutherford,USA,82500,7.0,13,Ma Ning,5.5,6,83,2030.0,1530.0,0,0,29.36302848417838,27.508134575896385,932,643,893232413.0,61329838.0,34355092.807692304,2358839.923076923,6,6,1.0,1.0,0.0,1.0,55.0,44.0,12.0,14.0,5.0,1.0,3.0,5.0,6.0,5.0,16.0,12.0,0.0,2.0,1.62,1.1,1.25,0.65,3,0,Regular,1.16,0.9,H
+30,2026-06-19,18:00,1,0,12,Scotland,SCO,UEFA,10,Morocco,MAR,CAF,4,Dallas Stadium (AT&T Stadium),Arlington,USA,80000,184.0,14,Alireza Faghani,4.2,39,7,1720.0,1920.0,0,0,29.202443005317754,26.598957510661826,989,723,125095414.0,456754154.0,4811362.076923077,17567467.46153846,6,6,1.0,0.0,1.0,1.0,56.0,45.0,12.0,14.0,3.0,3.0,2.0,4.0,6.0,2.0,10.0,14.0,3.0,1.0,0.65,1.25,1.1,1.62,0,1,Regular,0.97,0.54,A
+31,2026-06-19,21:00,1,0,13,USA,USA,CONCACAF,15,Australia,AUS,AFC,6,Toronto Stadium (BMO Field),Toronto,CAN,30000,76.0,15,Yoshimi Yamashita,3.4,17,27,1850.0,1790.0,0,0,26.904964987100513,27.359448217764445,977,751,378812045.0,80038893.0,14569694.038461538,3078418.9615384615,7,6,4.0,1.0,2.0,0.0,59.0,27.0,16.0,9.0,6.0,4.0,1.0,2.0,3.0,5.0,13.0,12.0,2.0,1.0,2.76,0.88,1.48,0.72,2,0,Regular,1.21,0.32,H
+32,2026-06-19,23:59,1,0,16,Türkiye,TUR,UEFA,14,Paraguay,PAR,CONMEBOL,8,Monterrey Stadium (Estadio BBVA),Guadalupe,MEX,53500,538.0,16,Facundo Tello,5.0,26,54,1780.0,1725.0,0,0,27.67219501921761,29.002579897857103,989,705,461171375.0,135683726.0,17737360.576923076,5218604.846153846,6,7,0.0,2.0,1.0,4.0,62.0,28.0,30.0,9.0,7.0,1.0,2.0,9.0,8.0,1.0,4.0,17.0,3.0,3.0,0.72,1.48,0.88,2.76,0,1,Regular,0.4,0.3,A
+33,2026-06-20,15:00,1,0,17,Germany,GER,UEFA,19,Côte d'Ivoire,CIV,CAF,10,Boston Stadium (Gillette Stadium),Foxborough,USA,65878,87.0,1,Szymon Marciniak,4.2,10,38,1970.0,1750.0,0,0,28.04675406728795,25.848996998894332,860,722,988741629.0,494766342.0,38028524.192307696,19029474.692307692,6,6,7.0,1.0,1.0,0.0,63.0,41.0,25.0,15.0,12.0,4.0,1.0,3.0,8.0,3.0,10.0,12.0,1.0,2.0,4.82,0.44,1.1,0.95,2,1,Regular,1.85,0.72,H
+34,2026-06-20,18:00,1,0,20,Ecuador,ECU,CONMEBOL,18,Curaçao,CUW,CONCACAF,12,Kansas City Stadium (Arrowhead Stadium),Kansas City,USA,76416,264.0,2,Daniele Orsato,4.8,23,82,1870.0,1520.0,0,0,26.07760753961986,28.0209550887169,785,635,258787288.0,40068087.0,9953357.23076923,1541080.2692307692,6,6,0.0,1.0,1.0,7.0,49.0,37.0,12.0,8.0,1.0,1.0,3.0,5.0,5.0,1.0,14.0,12.0,3.0,2.0,0.95,1.1,0.44,4.82,0,0,Regular,1.92,0.08,D
+35,2026-06-20,21:00,1,0,21,Netherlands,NED,UEFA,23,Sweden,SWE,UEFA,14,Philadelphia Stadium (Lincoln Financial Field),Philadelphia,USA,69796,3.0,3,Michael Oliver,3.9,8,25,1980.0,1815.0,0,0,27.77444321592166,27.557099984204708,877,531,765217546.0,408522445.0,29431444.076923076,15712401.73076923,6,6,2.0,2.0,5.0,1.0,61.0,49.0,10.0,13.0,5.0,7.0,3.0,1.0,5.0,4.0,7.0,10.0,2.0,3.0,1.95,1.82,3.12,0.78,5,1,Regular,3.45,0.88,H
+36,2026-06-20,23:59,1,0,24,Tunisia,TUN,CAF,22,Japan,JPN,AFC,16,Seattle Stadium (Lumen Field),Seattle,USA,69000,3.0,4,Anthony Taylor,4.1,45,18,1710.0,1880.0,0,0,26.644658558416264,27.49518243563418,596,823,78914514.0,270850000.0,3035173.6153846155,10417307.692307692,6,6,1.0,5.0,2.0,2.0,51.0,39.0,6.0,9.0,2.0,5.0,6.0,3.0,2.0,4.0,8.0,7.0,1.0,1.0,0.78,3.12,1.82,1.95,0,4,Regular,0.35,3.12,A
+37,2026-06-21,15:00,1,0,25,Belgium,BEL,UEFA,27,IR Iran,IRN,AFC,11,Houston Stadium (NRG Stadium),Houston,USA,72220,14.0,5,Clément Turpin,3.6,9,20,1950.0,1820.0,0,0,27.614489548781133,30.3325435686832,1101,1191,634065971.0,145435820.0,24387152.730769232,5593685.384615385,6,6,1.0,1.0,2.0,2.0,57.0,43.0,15.0,17.0,3.0,4.0,2.0,5.0,2.0,4.0,15.0,10.0,0.0,2.0,1.58,1.12,1.88,1.2,0,0,Regular,1.45,0.62,D
+38,2026-06-21,18:00,1,0,28,New Zealand,NZL,OFC,26,Egypt,EGY,CAF,13,Miami Stadium (Hard Rock Stadium),Miami Gardens,USA,64767,2.0,6,Danny Makkelie,3.8,85,36,1510.0,1730.0,0,0,28.26704575369873,29.058916442900006,848,847,37905696.0,197591799.0,1457911.3846153845,7599684.576923077,6,6,2.0,2.0,1.0,1.0,45.0,43.0,14.0,14.0,8.0,3.0,7.0,2.0,1.0,7.0,8.0,15.0,1.0,1.0,1.2,1.88,1.12,1.58,1,3,Regular,0.55,2.15,A
+39,2026-06-21,21:00,1,0,29,Spain,ESP,UEFA,31,Saudi Arabia,KSA,AFC,15,San Francisco Bay Area Stadium (Levi's Stadium),Santa Clara,USA,68500,8.0,7,Jesús Valenzuela,4.9,2,58,2120.0,1660.0,0,0,26.747433264887068,28.516084873374396,758,943,2134173029.0,129541211.0,82083578.03846154,4982354.269230769,6,6,0.0,0.0,1.0,1.0,74.0,27.0,23.0,7.0,8.0,3.0,6.0,8.0,11.0,4.0,10.0,11.0,2.0,2.0,2.15,0.35,0.85,1.76,4,0,Regular,3.28,0.25,H
+40,2026-06-21,23:59,1,0,32,Uruguay,URU,CONMEBOL,30,Cabo Verde,CPV,CAF,2,New York New Jersey Stadium (MetLife Stadium),East Rutherford,USA,82500,7.0,8,Wilton Sampaio,4.5,16,67,1960.0,1640.0,0,0,28.74227346917286,29.676407097351653,943,841,320346330.0,95326451.0,12321012.692307692,3666401.9615384615,6,6,1.0,1.0,0.0,0.0,63.0,26.0,27.0,6.0,10.0,1.0,2.0,7.0,14.0,1.0,6.0,1.0,1.0,3.0,1.76,0.85,0.35,2.15,2,2,Regular,1.65,1.1,D
+41,2026-06-22,15:00,1,0,33,France,FRA,UEFA,35,Iraq,IRQ,AFC,4,Dallas Stadium (AT&T Stadium),Arlington,USA,80000,184.0,9,César Arturo Ramos,4.0,3,55,2100.0,1630.0,0,0,27.001000368556838,26.91475806876218,816,845,1546204469.0,123868581.0,59469402.65384615,4764176.192307692,6,6,3.0,1.0,1.0,4.0,49.0,34.0,11.0,11.0,8.0,1.0,2.0,7.0,6.0,5.0,5.0,12.0,2.0,1.0,2.44,1.05,0.68,2.85,3,0,Regular,2.21,0.45,H
+42,2026-06-22,18:00,1,0,36,Norway,NOR,UEFA,34,Senegal,SEN,CAF,6,Toronto Stadium (BMO Field),Toronto,CAN,30000,76.0,10,Ivan Barton,5.1,44,15,1775.0,1840.0,0,0,26.804191017743374,27.087242668351504,817,1032,465149822.0,456345117.0,17890377.769230768,17551735.269230768,6,6,4.0,1.0,1.0,3.0,57.0,44.0,11.0,6.0,5.0,2.0,1.0,4.0,4.0,4.0,13.0,9.0,0.0,1.0,2.85,0.68,1.05,2.44,3,2,Regular,1.95,1.48,H
+43,2026-06-22,21:00,1,0,37,Argentina,ARG,CONMEBOL,39,Austria,AUT,UEFA,8,Monterrey Stadium (Estadio BBVA),Guadalupe,MEX,53500,538.0,11,Mustapha Ghorbal,3.7,1,24,2150.0,1830.0,0,0,29.11820144263676,28.61148844311062,1267,1020,1025039444.0,243918243.0,39424594.0,9381470.884615384,6,6,3.0,0.0,3.0,1.0,49.0,53.0,10.0,10.0,6.0,4.0,1.0,1.0,2.0,4.0,13.0,12.0,3.0,3.0,2.65,0.42,1.98,0.88,2,0,Regular,1.78,0.55,H
+44,2026-06-22,23:59,1,0,40,Jordan,JOR,AFC,38,Algeria,ALG,CAF,10,Boston Stadium (Gillette Stadium),Foxborough,USA,65878,87.0,12,Victor Gomes,4.3,63,28,1610.0,1760.0,0,0,28.46553993576581,26.85736850418575,1079,793,104311966.0,229140860.0,4011998.6923076925,8813110.0,6,6,1.0,3.0,0.0,3.0,33.0,51.0,11.0,7.0,3.0,1.0,6.0,4.0,3.0,2.0,7.0,8.0,1.0,1.0,0.88,1.98,0.42,2.65,1,2,Regular,0.88,1.92,A
+45,2026-06-23,15:00,1,0,41,Portugal,POR,UEFA,43,Uzbekistan,UZB,AFC,12,Kansas City Stadium (Arrowhead Stadium),Kansas City,USA,76416,264.0,13,Ma Ning,5.5,5,50,2010.0,1650.0,0,0,28.035276154372664,28.21323645553625,1176,972,1145908765.0,85125000.0,44073414.038461536,3274038.4615384615,6,6,1.0,1.0,1.0,3.0,68.0,33.0,7.0,8.0,1.0,2.0,5.0,6.0,5.0,3.0,9.0,14.0,3.0,2.0,1.78,1.15,0.95,2.1,5,0,Regular,3.54,0.42,H
+46,2026-06-23,18:00,1,0,44,Colombia,COL,CONMEBOL,42,Congo DR,COD,CAF,14,Philadelphia Stadium (Lincoln Financial Field),Philadelphia,USA,69796,3.0,14,Alireza Faghani,4.2,13,61,1990.0,1670.0,0,0,30.089296056441846,29.06870952456168,1059,806,460943359.0,153037838.0,17728590.730769232,5886070.692307692,6,6,3.0,1.0,1.0,1.0,56.0,25.0,15.0,8.0,4.0,2.0,2.0,3.0,4.0,4.0,11.0,10.0,1.0,2.0,2.1,0.95,1.15,1.78,1,0,Regular,1.62,0.58,H
+47,2026-06-23,21:00,1,0,45,England,ENG,UEFA,47,Ghana,GHA,CAF,16,Seattle Stadium (Lumen Field),Seattle,USA,69000,3.0,15,Yoshimi Yamashita,3.4,4,49,2050.0,1690.0,0,0,27.273205917969776,26.975201389985788,853,585,1321818896.0,198837737.0,50839188.307692304,7647605.269230769,6,6,4.0,2.0,1.0,0.0,48.0,35.0,22.0,7.0,11.0,2.0,4.0,5.0,8.0,2.0,10.0,9.0,2.0,1.0,2.92,1.64,1.3,0.75,0,0,Regular,1.12,0.89,D
+48,2026-06-23,23:59,1,0,48,Panama,PAN,CONCACAF,46,Croatia,CRO,UEFA,1,Mexico City Stadium (Estadio Azteca),Mexico City,MEX,80824,2200.0,16,Facundo Tello,5.0,34,11,1680.0,1940.0,0,0,30.426578213025852,28.32875269836256,1556,1176,174127946.0,387300000.0,6697228.692307692,14896153.846153846,6,6,0.0,1.0,2.0,4.0,55.0,43.0,11.0,10.0,4.0,5.0,1.0,6.0,2.0,2.0,11.0,12.0,2.0,3.0,0.75,1.3,1.64,2.92,0,1,Regular,0.42,1.48,A
+49,2026-06-24,18:00,1,0,4,Czechia,CZE,UEFA,1,Mexico,MEX,CONCACAF,1,Mexico City Stadium (Estadio Azteca),Mexico City,MEX,80824,2200.0,1,Szymon Marciniak,4.2,40,14,1740.0,1810.0,0,1,27.620807665982205,27.900700257989794,738,1237,187141830.0,411906509.0,7197762.692307692,15842558.038461538,6,6,1.0,1.5,1.5,0.0,39.0,53.0,12.0,12.0,3.0,4.0,3.5,1.5,4.0,3.0,12.5,10.0,1.5,1.5,1.235,1.2999999999999998,1.73,0.55,0,3,Regular,1.1,1.27,A
+50,2026-06-24,18:00,1,0,2,South Africa,RSA,CAF,3,South Korea,KOR,AFC,7,Guadalajara Stadium (Estadio Akron),Zapopan,MEX,48070,1566.0,2,Daniele Orsato,4.8,60,22,1620.0,1800.0,0,0,26.808403095877427,28.065708418891173,538,974,47700000.0,139050000.0,1834615.3846153845,5348076.923076923,6,6,0.5,1.5,1.0,1.0,51.5,52.5,10.0,10.5,3.0,3.5,4.0,2.5,4.0,3.0,12.5,8.5,2.0,1.5,0.835,1.5950000000000002,1.015,1.37,1,0,Regular,1.26,1.39,H
+51,2026-06-24,22:00,1,0,8,Switzerland,SUI,UEFA,5,Canada,CAN,CONCACAF,5,Vancouver Stadium (BC Place),Vancouver,CAN,54500,9.0,3,Michael Oliver,3.9,19,33,1860.0,1795.0,0,1,28.307060495972202,26.972674143105355,1148,973,357184518.0,204233523.0,13737866.076923076,7855135.5,6,6,2.5,1.0,3.5,0.5,57.5,58.5,19.5,23.0,7.0,7.5,1.5,1.5,8.5,14.0,9.0,10.5,1.0,2.5,1.995,0.8300000000000001,2.585,0.6,2,1,Regular,0.71,1.35,H
+52,2026-06-24,22:00,1,0,6,Bosnia and Herzegovina,BIH,UEFA,7,Qatar,QAT,AFC,6,Toronto Stadium (BMO Field),Toronto,CAN,30000,76.0,4,Anthony Taylor,4.1,64,56,1645.0,1600.0,0,0,26.456483967777597,29.50771336808298,613,1586,146400000.0,121299976.0,5630769.230769231,4665383.692307692,6,6,1.0,2.5,0.5,3.5,31.5,24.0,6.5,4.0,3.0,1.5,5.0,6.5,3.5,2.0,16.0,11.0,1.0,1.0,0.9299999999999999,1.9000000000000001,0.5,2.6799999999999997,3,1,Regular,1.48,0.95,H
+53,2026-06-25,18:00,1,0,12,Scotland,SCO,UEFA,9,Brazil,BRA,CONMEBOL,2,New York New Jersey Stadium (MetLife Stadium),East Rutherford,USA,82500,7.0,5,Clément Turpin,3.6,39,6,1720.0,2030.0,0,0,29.202443005317754,29.36302848417838,989,932,125095414.0,893232413.0,4811362.076923077,34355092.807692304,6,6,0.5,0.5,2.0,0.5,48.5,57.0,9.0,13.0,1.5,5.5,2.0,1.5,4.0,5.5,11.0,13.0,2.0,1.0,0.81,0.895,1.3900000000000001,1.0,0,3,Regular,0.45,2.18,A
+54,2026-06-25,18:00,1,0,10,Morocco,MAR,CAF,11,Haiti,HAI,CONCACAF,10,Boston Stadium (Gillette Stadium),Foxborough,USA,65878,87.0,6,Danny Makkelie,3.8,7,83,1920.0,1530.0,0,0,26.598957510661826,27.508134575896385,723,643,456754154.0,61329838.0,17567467.46153846,2358839.923076923,6,6,1.0,0.5,0.0,2.0,52.0,42.5,13.0,9.0,3.5,0.5,3.0,4.5,3.5,3.5,12.0,12.0,1.5,1.5,0.8200000000000001,1.295,1.075,0.905,4,2,Regular,2.35,1.12,H
+55,2026-06-25,22:00,1,0,16,Türkiye,TUR,UEFA,13,USA,USA,CONCACAF,3,Los Angeles Stadium (SoFi Stadium),Inglewood,USA,70240,30.0,7,Jesús Valenzuela,4.9,26,17,1780.0,1850.0,0,1,27.67219501921761,26.904964987100513,989,977,461171375.0,378812045.0,17737360.576923076,14569694.038461538,6,6,0.0,1.5,3.0,0.5,64.5,57.0,31.0,13.0,6.0,4.0,2.0,1.0,10.0,5.0,9.0,12.5,2.5,1.5,0.56,0.89,1.9849999999999999,0.6,3,2,Regular,1.62,1.45,H
+56,2026-06-25,22:00,1,0,14,Paraguay,PAR,CONMEBOL,15,Australia,AUS,AFC,15,San Francisco Bay Area Stadium (Levi's Stadium),Santa Clara,USA,68500,8.0,8,Wilton Sampaio,4.5,54,27,1725.0,1790.0,0,0,29.002579897857103,27.359448217764445,705,751,135683726.0,80038893.0,5218604.846153846,3078418.9615384615,6,6,1.0,2.0,1.0,1.0,23.5,28.5,8.0,7.0,1.5,3.0,6.5,2.0,0.5,4.5,16.0,14.0,2.0,0.5,0.59,1.5799999999999998,0.9,0.965,0,0,Regular,0.55,0.48,D
+57,2026-06-26,18:00,1,0,20,Ecuador,ECU,CONMEBOL,17,Germany,GER,UEFA,9,Atlanta Stadium (Mercedes-Benz Stadium),Atlanta,USA,71000,318.0,9,César Arturo Ramos,4.0,23,10,1870.0,1970.0,0,0,26.07760753961986,28.04675406728795,785,860,258787288.0,988741629.0,9953357.23076923,38028524.192307696,6,6,0.0,0.5,4.5,1.0,56.0,61.0,20.0,20.5,8.0,10.0,9.0,1.5,7.0,8.0,13.0,8.5,1.5,1.0,1.435,0.5900000000000001,3.335,0.58,2,1,Regular,1.28,1.55,H
+58,2026-06-26,18:00,1,0,18,Curaçao,CUW,CONCACAF,19,Côte d'Ivoire,CIV,CAF,11,Houston Stadium (NRG Stadium),Houston,USA,72220,14.0,10,Ivan Barton,5.1,82,38,1520.0,1750.0,0,0,28.0209550887169,25.848996998894332,635,722,40068087.0,494766342.0,1541080.2692307692,19029474.692307692,6,6,0.5,3.5,1.0,1.0,37.0,41.0,6.5,12.0,1.0,3.5,10.0,4.5,0.5,3.0,13.0,10.0,1.5,2.0,0.26,3.37,0.91,1.4,0,2,Regular,0.32,1.68,A
+59,2026-06-26,22:00,1,0,24,Tunisia,TUN,CAF,21,Netherlands,NED,UEFA,12,Kansas City Stadium (Arrowhead Stadium),Kansas City,USA,76416,264.0,11,Mustapha Ghorbal,3.7,45,8,1710.0,1980.0,0,0,26.644658558416264,27.77444321592166,596,877,78914514.0,765217546.0,3035173.6153846155,29431444.076923076,6,6,0.5,4.5,3.5,1.5,44.5,54.5,4.5,10.0,1.5,6.0,3.5,2.5,2.5,6.0,8.0,9.0,1.5,2.0,0.565,3.12,2.7,1.35,1,3,Regular,0.62,2.15,A
+60,2026-06-26,22:00,1,0,22,Japan,JPN,AFC,23,Sweden,SWE,UEFA,16,Seattle Stadium (Lumen Field),Seattle,USA,69000,3.0,12,Victor Gomes,4.3,18,25,1880.0,1815.0,0,0,27.49518243563418,27.557099984204708,823,531,270850000.0,408522445.0,10417307.692307692,15712401.73076923,6,6,3.0,1.0,3.0,3.0,50.5,46.0,11.5,14.5,5.0,7.5,2.0,4.0,4.5,3.5,11.0,12.0,1.0,3.0,2.47,1.15,2.0,2.115,1,1,Regular,1.12,0.95,D
+65,2026-06-26,18:00,1,0,36,Norway,NOR,UEFA,33,France,FRA,UEFA,10,Boston Stadium (Gillette Stadium),Foxborough,USA,65878,87.0,1,Szymon Marciniak,4.2,44,3,1775.0,2100.0,0,0,26.804191017743374,27.001000368556838,817,816,465149822.0,1546204469.0,17890377.769230768,59469402.65384615,4,4,3.5,1.5,3.0,0.5,54.5,52.5,11.5,15.0,5.5,6.5,1.5,1.0,4.5,5.0,13.0,6.5,0.5,2.0,2.4,1.08,2.325,0.75,1,4,Regular,1.3,0.96,A
+66,2026-06-26,18:00,1,0,34,Senegal,SEN,CAF,35,Iraq,IRQ,AFC,2,New York New Jersey Stadium (MetLife Stadium),East Rutherford,USA,82500,7.0,2,Daniele Orsato,4.8,15,55,1840.0,1630.0,0,0,27.087242668351504,26.91475806876218,1032,845,456345117.0,123868581.0,17551735.269230768,4764176.192307692,4,4,1.5,3.0,0.5,3.5,46.0,39.0,8.0,7.5,3.0,0.5,3.5,4.5,4.0,3.5,7.0,8.0,1.5,1.0,1.2650000000000001,2.195,0.5650000000000001,2.5300000000000002,5,0,Regular,3.01,0.14,H
+61,2026-06-27,18:00,1,0,28,New Zealand,NZL,OFC,25,Belgium,BEL,UEFA,4,Dallas Stadium (AT&T Stadium),Arlington,USA,80000,184.0,13,Ma Ning,5.5,85,9,1510.0,1950.0,0,0,28.26704575369873,27.614489548781133,848,1101,37905696.0,634065971.0,1457911.3846153845,24387152.730769232,6,6,1.5,2.5,0.5,0.5,42.0,58.0,12.5,19.0,5.5,5.5,5.5,2.0,2.5,3.0,11.0,11.0,1.5,0.5,0.875,2.0149999999999997,1.5150000000000001,0.8700000000000001,1,5,Regular,0.48,3.25,A
+62,2026-06-27,18:00,1,0,26,Egypt,EGY,CAF,27,IR Iran,IRN,AFC,8,Monterrey Stadium (Estadio BBVA),Guadalupe,MEX,53500,538.0,14,Alireza Faghani,4.2,36,20,1730.0,1820.0,0,0,29.058916442900006,30.3325435686832,847,1191,197591799.0,145435820.0,7599684.576923077,5593685.384615385,6,6,2.0,1.0,1.0,1.0,46.5,36.5,16.5,12.0,5.0,3.0,2.0,6.5,5.5,3.0,11.5,9.5,1.0,2.5,1.635,1.065,1.25,1.325,1,1,Regular,0.85,0.92,D
+63,2026-06-27,22:00,1,0,32,Uruguay,URU,CONMEBOL,29,Spain,ESP,UEFA,13,Miami Stadium (Hard Rock Stadium),Miami Gardens,USA,64767,2.0,15,Yoshimi Yamashita,3.4,16,2,1960.0,2120.0,0,0,28.74227346917286,26.747433264887068,943,758,320346330.0,2134173029.0,12321012.692307692,82083578.03846154,6,6,1.5,1.5,2.0,0.0,64.0,70.5,22.0,20.5,8.5,8.0,2.0,3.5,12.5,8.5,8.5,8.0,1.5,2.5,1.705,0.9750000000000001,2.715,0.3,0,1,Regular,0.78,1.35,A
+64,2026-06-27,22:00,1,0,30,Cabo Verde,CPV,CAF,31,Saudi Arabia,KSA,AFC,14,Philadelphia Stadium (Lincoln Financial Field),Philadelphia,USA,69796,3.0,16,Facundo Tello,5.0,67,58,1640.0,1660.0,0,0,29.676407097351653,28.516084873374396,841,943,95326451.0,129541211.0,3666401.9615384615,4982354.269230769,6,6,1.0,1.0,0.5,2.5,30.5,30.0,9.0,6.0,2.5,2.0,6.0,6.0,2.5,2.5,2.5,10.5,2.0,2.0,0.7250000000000001,1.9,0.55,2.52,0,0,Regular,0.42,0.38,D
+67,2026-06-27,22:00,1,0,40,Jordan,JOR,AFC,37,Argentina,ARG,CONMEBOL,15,San Francisco Bay Area Stadium (Levi's Stadium),Santa Clara,USA,68500,8.0,3,Michael Oliver,3.9,63,1,1610.0,2150.0,0,0,28.46553993576581,29.11820144263676,1079,1267,104311966.0,1025039444.0,4011998.6923076925,39424594.0,5,5,1.0,2.5,2.5,0.0,31.0,51.5,8.5,11.0,2.5,5.5,5.0,1.0,2.5,1.5,9.5,13.0,1.0,2.5,0.88,1.95,2.215,0.485,1,3,Regular,0.76,2.13,A
+68,2026-06-27,22:00,1,0,38,Algeria,ALG,CAF,39,Austria,AUT,UEFA,3,Los Angeles Stadium (SoFi Stadium),Inglewood,USA,70240,30.0,4,Anthony Taylor,4.1,28,24,1760.0,1830.0,0,0,26.85736850418575,28.61148844311062,793,1020,229140860.0,243918243.0,8813110.0,9381470.884615384,5,5,1.0,2.0,1.5,1.5,61.0,49.5,12.5,8.0,3.5,2.5,2.5,2.0,4.5,3.5,8.5,12.5,1.5,2.0,1.17,1.765,1.2650000000000001,1.33,3,3,Regular,1.62,1.44,D
+69,2026-06-28,18:00,1,0,44,Colombia,COL,CONMEBOL,41,Portugal,POR,UEFA,13,Miami Stadium (Hard Rock Stadium),Miami Gardens,USA,64767,2.0,5,Clément Turpin,3.6,13,5,1990.0,2010.0,0,0,30.089296056441846,28.035276154372664,1059,1176,460943359.0,1145908765.0,17728590.730769232,44073414.038461536,5,5,2.0,0.5,3.0,0.5,57.0,65.0,14.5,12.5,4.0,4.5,2.0,3.0,4.5,6.0,11.0,9.5,1.5,2.0,1.86,0.7649999999999999,2.66,0.7849999999999999,0,0,Regular,1.62,0.73,D
+70,2026-06-28,18:00,1,0,42,Congo DR,COD,CAF,43,Uzbekistan,UZB,AFC,9,Atlanta Stadium (Mercedes-Benz Stadium),Atlanta,USA,71000,318.0,6,Danny Makkelie,3.8,61,50,1670.0,1650.0,0,0,29.06870952456168,28.21323645553625,806,972,153037838.0,85125000.0,5886070.692307692,3274038.4615384615,5,5,0.5,1.0,0.5,4.0,33.5,35.5,8.0,6.5,2.0,1.5,3.0,4.5,3.5,2.5,12.0,13.0,1.5,2.0,0.865,1.7000000000000002,0.6849999999999999,2.8200000000000003,3,1,Regular,2.35,0.2,H
+71,2026-06-28,22:00,1,0,48,Panama,PAN,CONCACAF,45,England,ENG,UEFA,2,New York New Jersey Stadium (MetLife Stadium),East Rutherford,USA,82500,7.0,7,Jesús Valenzuela,4.9,34,4,1680.0,2050.0,0,0,30.426578213025852,27.273205917969776,1556,853,174127946.0,1321818896.0,6697228.692307692,50839188.307692304,5,5,0.0,1.0,2.0,1.0,49.5,53.5,9.0,16.5,2.5,7.0,2.0,3.0,2.0,7.0,12.5,9.0,2.0,2.0,0.585,1.3900000000000001,2.02,1.265,0,2,Regular,0.69,1.39,A
+72,2026-06-28,22:00,1,0,46,Croatia,CRO,UEFA,47,Ghana,GHA,CAF,14,Philadelphia Stadium (Lincoln Financial Field),Philadelphia,USA,69796,3.0,8,Wilton Sampaio,4.5,11,49,1940.0,1690.0,0,0,28.32875269836256,26.975201389985788,1176,585,387300000.0,198837737.0,14896153.846153846,7647605.269230769,5,5,1.5,2.0,0.5,0.0,49.5,38.0,12.5,8.0,4.5,2.0,3.5,4.0,3.5,2.5,11.0,10.5,2.0,1.0,1.56,1.67,1.095,0.935,2,1,Regular,0.42,0.74,H
+73,2026-06-29,12:00,2,1,2,South Africa,RSA,CAF,5,Canada,CAN,CONCACAF,3,Los Angeles Stadium (SoFi Stadium),Inglewood,USA,70240,30.0,17,João Pinheiro,4.7,60,33,1620.0,1795.0,0,0,26.808403095877427,26.972674143105355,538,973,47700000.0,204233523.0,1834615.3846153845,7855135.5,5,5,0.6666666666666666,1.0,2.6666666666666665,1.0,45.0,54.0,11.0,19.666666666666668,3.3333333333333335,7.333333333333333,3.6666666666666665,1.6666666666666667,3.6666666666666665,11.0,12.333333333333334,10.333333333333334,1.6666666666666667,2.6666666666666665,0.9766666666666666,1.5266666666666666,2.1733333333333333,0.6366666666666666,0,1,Regular,0.13,1.32,A
+74,2026-06-29,23:00,2,1,9,Brazil,BRA,CONMEBOL,22,Japan,JPN,AFC,11,Houston Stadium (NRG Stadium),Houston,USA,72220,14.0,18,Maurizio Mariani,4.8,6,18,2030.0,1880.0,0,0,29.36302848417838,27.49518243563418,932,823,893232413.0,270850000.0,34355092.807692304,10417307.692307692,4,3,2.3333333333333335,0.3333333333333333,2.3333333333333335,1.0,59.666666666666664,50.666666666666664,14.666666666666666,12.0,6.666666666666667,5.0,1.6666666666666667,2.3333333333333335,5.666666666666667,4.666666666666667,11.333333333333334,10.333333333333334,1.6666666666666667,1.3333333333333333,1.6533333333333333,0.8166666666666668,2.02,1.0833333333333333,2,1,Regular,1.69,0.23,H
+75,2026-06-30,02:30,2,1,17,Germany,GER,UEFA,14,Paraguay,PAR,CONMEBOL,10,Boston Stadium (Gillette Stadium),Foxborough,USA,65878,87.0,19,Jalal Jayed,4.6,10,54,1970.0,1725.0,0,0,28.04675406728795,29.002579897857103,860,705,988741629.0,135683726.0,38028524.192307696,5218604.846153846,4,5,3.3333333333333335,1.3333333333333333,0.6666666666666666,1.3333333333333333,59.333333333333336,30.333333333333332,19.0,8.0,9.0,1.6666666666666667,2.0,6.333333333333333,7.333333333333333,0.6666666666666666,9.0,13.666666666666666,1.3333333333333333,1.3333333333333333,2.74,0.8133333333333334,0.5766666666666667,1.2133333333333332,1,1,Penalties,0.72,0.42,D
+76,2026-06-30,07:00,2,1,21,Netherlands,NED,UEFA,10,Morocco,MAR,CAF,8,Monterrey Stadium (Estadio BBVA),Guadalupe,MEX,53500,538.0,8,Wilton Sampaio,4.5,8,7,1980.0,1920.0,0,0,27.77444321592166,26.598957510661826,877,723,765217546.0,456754154.0,29431444.076923076,17567467.46153846,4,5,3.3333333333333335,1.3333333333333333,2.0,1.0,57.0,55.333333333333336,12.666666666666666,15.666666666666666,7.0,5.333333333333333,2.3333333333333335,3.0,6.333333333333333,4.666666666666667,9.0,11.333333333333334,2.0,2.0,2.5166666666666666,1.1066666666666667,1.33,1.2366666666666666,1,1,Penalties,0.23,1.4,D
+77,2026-06-30,23:00,2,1,19,Côte d'Ivoire,CIV,CAF,36,Norway,NOR,UEFA,4,Dallas Stadium (AT&T Stadium),Arlington,USA,80000,184.0,7,Jesús Valenzuela,4.9,38,44,1750.0,1775.0,0,0,25.848996998894332,26.804191017743374,722,817,494766342.0,465149822.0,19029474.692307692,17890377.769230768,4,4,1.3333333333333333,0.6666666666666666,2.6666666666666665,2.3333333333333335,47.0,52.0,13.333333333333334,10.666666666666666,4.666666666666667,5.333333333333333,3.6666666666666665,2.3333333333333335,4.0,4.0,10.333333333333334,11.333333333333334,2.3333333333333335,0.3333333333333333,1.1666666666666667,1.04,2.033333333333333,1.04,1,2,Regular,1.15,2.02,A
+78,2026-07-01,03:00,2,1,33,France,FRA,UEFA,23,Sweden,SWE,UEFA,2,New York New Jersey Stadium (MetLife Stadium),East Rutherford,USA,82500,7.0,6,Danny Makkelie,3.8,3,25,2100.0,1815.0,0,0,27.001000368556838,27.557099984204708,816,531,1546204469.0,408522445.0,59469402.65384615,15712401.73076923,5,5,3.3333333333333335,0.6666666666666666,2.3333333333333335,2.3333333333333335,52.666666666666664,47.0,15.666666666666666,13.333333333333334,7.333333333333333,6.333333333333333,2.0,4.0,5.0,3.6666666666666665,6.666666666666667,12.0,2.0,2.3333333333333335,1.8699999999999999,0.9333333333333335,1.6500000000000001,1.7833333333333334,3,0,Regular,3.17,0.67,H
+79,2026-07-01,07:00,2,1,1,Mexico,MEX,CONCACAF,20,Ecuador,ECU,CONMEBOL,1,Mexico City Stadium (Estadio Azteca),Mexico City,MEX,80824,2200.0,20,Slavko Vinčić,4.1,14,23,1810.0,1870.0,1,0,27.900700257989794,26.07760753961986,1237,785,411906509.0,258787288.0,15842558.038461538,9953357.23076923,7,5,2.0,0.0,0.6666666666666666,0.6666666666666666,52.0,52.0,11.666666666666666,17.0,4.333333333333333,7.0,1.3333333333333333,8.0,2.3333333333333335,5.666666666666667,11.0,13.0,1.3333333333333333,1.3333333333333333,1.5766666666666669,0.7333333333333334,1.3833333333333335,0.91,2,0,Regular,1.02,0.73,H
+80,2026-07-01,22:00,2,1,45,England,ENG,UEFA,42,Congo DR,COD,CAF,9,Atlanta Stadium (Mercedes-Benz Stadium),Atlanta,USA,71000,318.0,21,Adham Makhadmeh,4.2,4,61,2050.0,1670.0,0,0,27.273205917969776,29.06870952456168,853,806,1321818896.0,153037838.0,50839188.307692304,5886070.692307692,3,3,2.0,0.6666666666666666,1.3333333333333333,1.0,58.0,43.666666666666664,16.666666666666668,11.666666666666666,6.666666666666667,2.6666666666666665,2.6666666666666665,2.3333333333333335,7.0,3.0,10.333333333333334,10.0,2.6666666666666665,2.0,1.8099999999999998,1.0733333333333333,1.36,1.2,2,1,Regular,2.04,0.76,H
+81,2026-07-02,02:00,2,1,25,Belgium,BEL,UEFA,34,Senegal,SEN,CAF,16,Seattle Stadium (Lumen Field),Seattle,USA,69000,3.0,22,Saíd Martínez,4.1,9,15,1950.0,1840.0,0,0,27.614489548781133,27.087242668351504,1101,1032,634065971.0,456345117.0,24387152.730769232,17551735.269230768,5,6,2.0,0.6666666666666666,2.6666666666666665,2.0,60.333333333333336,53.666666666666664,20.0,14.666666666666666,7.666666666666667,6.0,1.6666666666666667,2.6666666666666665,4.666666666666667,6.666666666666667,9.666666666666666,8.0,1.3333333333333333,1.3333333333333333,2.0933333333333333,0.7400000000000001,1.8466666666666667,1.51,3,2,AET,1.74,3.58,H
+82,2026-07-02,06:00,2,1,13,USA,USA,CONCACAF,6,Bosnia and Herzegovina,BIH,UEFA,15,San Francisco Bay Area Stadium (Levi's Stadium),Santa Clara,USA,68500,8.0,23,Raphael Claus,4.1,17,64,1850.0,1645.0,1,0,26.904964987100513,26.456483967777597,977,613,378812045.0,146400000.0,14569694.038461538,5630769.230769231,7,8,2.6666666666666665,1.3333333333333333,1.6666666666666667,2.0,55.333333333333336,39.0,13.0,9.0,4.333333333333333,3.6666666666666665,2.0,4.0,5.333333333333333,4.0,11.333333333333334,13.666666666666666,1.3333333333333333,1.0,1.8066666666666666,0.9400000000000001,1.1133333333333333,1.5833333333333333,2,0,Regular,0.92,0.25,H
+83,2026-07-03,01:00,2,1,29,Spain,ESP,UEFA,39,Austria,AUT,UEFA,3,Los Angeles Stadium (SoFi Stadium),Inglewood,USA,70240,30.0,24,Glenn Nyberg,3.1,2,24,2120.0,1830.0,0,0,26.747433264887068,28.61148844311062,758,1020,2134173029.0,243918243.0,82083578.03846154,9381470.884615384,6,6,1.6666666666666667,0.0,2.0,2.0,66.33333333333333,49.666666666666664,18.666666666666668,8.666666666666666,7.333333333333333,2.6666666666666665,3.3333333333333335,2.0,7.333333333333333,3.3333333333333335,8.333333333333334,10.666666666666666,2.0,2.3333333333333335,2.26,0.45999999999999996,1.3233333333333333,1.4266666666666667,3,0,Regular,2.84,0.32,H
+84,2026-07-03,05:00,2,1,41,Portugal,POR,UEFA,46,Croatia,CRO,UEFA,6,Toronto Stadium (BMO Field),Toronto,CAN,30000,76.0,25,Espen Eskås,2.9,5,11,2010.0,1940.0,0,0,28.035276154372664,28.32875269836256,1176,1176,1145908765.0,387300000.0,44073414.038461536,14896153.846153846,5,5,2.0,0.3333333333333333,1.6666666666666667,1.6666666666666667,58.333333333333336,50.666666666666664,12.666666666666666,11.0,3.6666666666666665,4.333333333333333,4.0,2.3333333333333335,4.666666666666667,3.3333333333333335,8.333333333333334,10.333333333333334,2.0,1.6666666666666667,2.0166666666666666,1.0633333333333332,1.18,1.36,2,1,Regular,2.18,1.34,H
+85,2026-07-03,09:00,2,1,8,Switzerland,SUI,UEFA,38,Algeria,ALG,CAF,5,Vancouver Stadium (BC Place),Vancouver,CAN,54500,9.0,26,Yael Falcón,5.4,19,28,1860.0,1760.0,0,0,28.307060495972202,26.85736850418575,1148,793,357184518.0,229140860.0,13737866.076923076,8813110.0,9,6,2.3333333333333335,1.0,1.6666666666666667,2.3333333333333335,56.666666666666664,57.333333333333336,15.0,12.333333333333334,6.0,4.0,3.0,1.6666666666666667,6.333333333333333,3.0,11.0,6.666666666666667,0.6666666666666666,1.3333333333333333,1.5666666666666667,1.0033333333333334,1.32,1.6566666666666665,2,0,Regular,2.52,0.73,H
+86,2026-07-04,00:00,2,1,15,Australia,AUS,AFC,26,Egypt,EGY,CAF,4,Dallas Stadium (AT&T Stadium),Arlington,USA,80000,184.0,27,Gustavo Tejera,5.1,27,36,1790.0,1730.0,0,0,27.359448217764445,29.058916442900006,751,847,80038893.0,197591799.0,3078418.9615384615,7599684.576923077,9,7,0.6666666666666666,0.6666666666666666,1.6666666666666667,1.0,37.666666666666664,46.666666666666664,8.666666666666666,14.666666666666666,3.6666666666666665,4.666666666666667,2.3333333333333335,2.3333333333333335,4.0,5.0,11.333333333333334,11.666666666666666,0.3333333333333333,1.0,0.7599999999999999,0.8266666666666667,1.3733333333333333,1.0166666666666668,1,1,Penalties,0.87,1.36,D
+87,2026-07-04,04:00,2,1,37,Argentina,ARG,CONMEBOL,30,Cabo Verde,CPV,CAF,13,Miami Stadium (Hard Rock Stadium),Miami Gardens,USA,64767,2.0,28,Drew Fischer,3.3,1,67,2150.0,1640.0,0,0,29.11820144263676,29.676407097351653,1267,841,1025039444.0,95326451.0,39424594.0,3666401.9615384615,7,7,2.6666666666666665,0.3333333333333333,0.6666666666666666,0.6666666666666666,58.666666666666664,37.333333333333336,11.333333333333334,11.0,5.0,2.6666666666666665,0.6666666666666666,5.0,3.0,3.0,11.0,5.0,1.6666666666666667,2.0,2.1866666666666665,0.5766666666666667,0.6233333333333334,1.3933333333333333,3,2,AET,2.16,0.46,H
+88,2026-07-04,07:30,2,1,44,Colombia,COL,CONMEBOL,47,Ghana,GHA,CAF,12,Kansas City Stadium (Arrowhead Stadium),Kansas City,USA,76416,264.0,5,Clément Turpin,3.6,13,49,1990.0,1690.0,0,0,30.089296056441846,26.975201389985788,1059,585,460943359.0,198837737.0,17728590.730769232,7647605.269230769,6,6,1.3333333333333333,0.3333333333333333,0.6666666666666666,0.6666666666666666,56.333333333333336,41.0,17.666666666666668,7.333333333333333,4.666666666666667,1.6666666666666667,2.0,3.3333333333333335,4.666666666666667,2.3333333333333335,11.333333333333334,11.333333333333334,2.0,1.3333333333333333,1.78,0.7533333333333333,0.9766666666666667,0.7633333333333333,1,0,Regular,2.19,0.26,H
+89,2026-07-04,21:00,3,1,14,Paraguay,PAR,CONMEBOL,33,France,FRA,UEFA,14,Philadelphia Stadium (Lincoln Financial Field),Philadelphia,USA,69796,3.0,13,Ma Ning,5.5,54,3,1725.0,2100.0,0,0,29.002579897857103,27.001000368556838,705,816,135683726.0,1546204469.0,5218604.846153846,59469402.65384615,4,3,0.75,1.25,3.25,0.5,28.75,54.75,7.75,18.0,2.0,8.5,6.25,2.25,2.0,6.0,13.25,8.5,1.25,2.25,0.5375,1.0899999999999999,2.195,0.8675,0,1,Regular,0.3,1.8,A
+90,2026-07-04,23:00,3,1,5,Canada,CAN,CONCACAF,10,Morocco,MAR,CAF,11,Houston Stadium (NRG Stadium),Houston,USA,72220,14.0,3,Michael Oliver,3.9,33,7,1795.0,1920.0,0,0,26.972674143105355,26.598957510661826,973,723,204233523.0,456754154.0,7855135.5,17567467.46153846,5,4,2.25,0.75,1.75,1.0,51.0,59.0,17.75,14.5,7.25,5.25,1.5,2.5,9.25,5.5,11.75,12.25,2.0,1.5,1.96,0.51,1.3475000000000001,0.9850000000000001,0,3,Regular,0.8,1.2,A
+91,2026-07-05,20:00,3,1,9,Brazil,BRA,CONMEBOL,36,Norway,NOR,UEFA,4,Dallas Stadium (AT&T Stadium),Arlington,USA,80000,184.0,14,Alireza Faghani,4.2,6,44,2030.0,1775.0,0,0,29.36302848417838,26.804191017743374,932,817,893232413.0,465149822.0,34355092.807692304,17890377.769230768,6,5,2.25,0.5,2.5,2.0,62.0,51.0,15.75,10.25,6.75,4.75,1.5,2.75,5.75,3.75,9.5,10.25,1.5,0.75,1.6625,0.67,2.0300000000000002,1.0675,1,2,Regular,2.61,1.05,A
+92,2026-07-06,01:00,3,1,1,Mexico,MEX,CONCACAF,45,England,ENG,UEFA,1,Mexico City Stadium (Estadio Azteca),Mexico City,MEX,80824,2200.0,14,Alireza Faghani,4.2,14,4,1810.0,2050.0,1,0,27.900700257989794,27.273205917969776,1237,853,411906509.0,1321818896.0,15842558.038461538,50839188.307692304,5,5,2.0,0.0,2.0,0.75,48.25,58.5,12.5,16.5,4.0,6.75,1.25,2.25,2.5,6.5,10.75,10.25,1.0,2.0,1.4375,0.7325,1.8675,0.995,2,3,Regular,1.88,1.61,A
+93,2026-07-06,19:00,3,1,41,Portugal,POR,UEFA,29,Spain,ESP,UEFA,13,Miami Stadium (Hard Rock Stadium),Miami Gardens,USA,64767,2.0,4,Anthony Taylor,4.1,5,2,2010.0,2120.0,0,0,28.035276154372664,26.747433264887068,1176,758,1145908765.0,2134173029.0,44073414.038461536,82083578.03846154,3,3,2.0,0.5,2.0,0.0,59.25,65.75,13.25,19.75,3.5,8.0,4.5,2.5,5.75,7.75,7.75,8.25,1.75,2.0,2.0575,1.1325,2.405,0.425,0,1,Regular,0.63,1.69,A
+94,2026-07-07,00:00,3,1,13,USA,USA,CONCACAF,25,Belgium,BEL,UEFA,15,San Francisco Bay Area Stadium (Levi's Stadium),Santa Clara,USA,68500,8.0,9,César Arturo Ramos,4.0,17,9,1850.0,1950.0,1,0,26.904964987100513,27.614489548781133,977,1101,378812045.0,634065971.0,14569694.038461538,24387152.730769232,5,5,2.5,1.0,2.25,1.0,53.5,58.25,11.75,19.75,3.75,7.0,2.25,2.0,5.0,4.5,10.25,12.75,1.75,1.5,1.585,0.7675000000000001,2.005,1.45,1,4,Regular,0.67,2.15,A
+95,2026-07-07,16:00,3,1,37,Argentina,ARG,CONMEBOL,26,Egypt,EGY,CAF,12,Kansas City Stadium (Arrowhead Stadium),Kansas City,USA,76416,264.0,1,Szymon Marciniak,4.2,1,36,2150.0,1730.0,0,0,29.11820144263676,29.058916442900006,1267,847,1025039444.0,197591799.0,39424594.0,7599684.576923077,3,3,2.75,0.75,1.5,1.0,60.0,49.5,14.0,15.0,6.5,4.75,1.25,2.25,4.25,5.25,10.5,11.75,2.0,1.0,2.18,0.5475,1.37,0.98,3,2,Regular,2.12,1.54,H
+96,2026-07-07,20:00,3,1,8,Switzerland,SUI,UEFA,44,Colombia,COL,CONMEBOL,16,Seattle Stadium (Lumen Field),Seattle,USA,69000,3.0,10,Ivan Barton,5.1,19,13,1860.0,1990.0,0,0,28.307060495972202,30.089296056441846,1148,1059,357184518.0,460943359.0,13737866.076923076,17728590.730769232,4,3,2.25,0.75,1.25,0.25,53.75,57.5,14.0,18.25,5.75,5.5,2.75,1.5,5.75,4.25,10.75,11.75,0.5,2.0,1.8050000000000002,0.935,1.8825,0.63,0,0,Penalties,1.15,1.46,D
+97,2026-07-09,20:00,4,1,33,France,FRA,UEFA,10,Morocco,MAR,CAF,10,Boston Stadium (Gillette Stadium),Foxborough,USA,65878,87.0,16,Facundo Tello,5.0,3,7,2100.0,1920.0,0,0,27.001000368556838,26.598957510661826,816,723,1546204469.0,456754154.0,59469402.65384615,17567467.46153846,5,5,2.8,0.4,2.0,0.8,59.0,57.2,17.4,12.6,7.8,5.0,2.0,2.6,7.2,4.6,9.0,12.6,1.8,1.8,2.116,0.754,1.318,0.9480000000000001,2,0,Regular,3.1,0.13,H
+98,2026-07-10,19:00,4,1,29,Spain,ESP,UEFA,25,Belgium,BEL,UEFA,3,Los Angeles Stadium (SoFi Stadium),Inglewood,USA,70240,30.0,3,Michael Oliver,3.9,2,9,2120.0,1950.0,0,0,26.747433264887068,27.614489548781133,758,1101,2134173029.0,634065971.0,82083578.03846154,24387152.730769232,4,3,1.8,0.0,2.6,1.0,63.6,55.4,18.8,18.8,7.6,7.0,2.4,1.8,7.6,4.6,9.2,12.0,1.8,1.4,2.2619999999999996,0.466,2.034,1.294,2,1,Regular,2.08,0.37,H
+99,2026-07-11,21:00,4,1,36,Norway,NOR,UEFA,45,England,ENG,UEFA,13,Miami Stadium (Hard Rock Stadium),Miami Gardens,USA,64767,2.0,5,Clément Turpin,3.6,44,4,1775.0,2050.0,0,0,26.804191017743374,27.273205917969776,817,853,465149822.0,1321818896.0,17890377.769230768,50839188.307692304,6,5,2.4,1.8,2.2,1.0,54.0,53.4,10.0,14.4,4.8,6.4,3.0,2.4,4.0,5.6,9.4,9.6,0.8,1.6,1.834,1.376,1.816,1.172,1,2,AET,0.77,0.96,A
+100,2026-07-12,01:00,4,1,37,Argentina,ARG,CONMEBOL,8,Switzerland,SUI,UEFA,12,Kansas City Stadium (Arrowhead Stadium),Kansas City,USA,76416,264.0,17,João Pinheiro,4.7,1,19,2150.0,1860.0,0,0,29.11820144263676,28.307060495972202,1267,1148,1025039444.0,357184518.0,39424594.0,13737866.076923076,5,5,2.8,1.0,1.8,0.6,58.8,51.6,14.2,13.4,6.2,5.2,1.4,3.2,4.6,5.6,10.4,11.6,2.0,0.6,2.168,0.746,1.6740000000000002,1.04,3,1,AET,2.0,0.53,H
+101,2026-07-14,20:00,5,1,33,France,FRA,UEFA,29,Spain,ESP,UEFA,4,Dallas Stadium (AT&T Stadium),Arlington,USA,80000,184.0,10,Ivan Barton,5.1,3,2,2100.0,2120.0,0,0,27.001000368556838,26.747433264887068,816,758,1546204469.0,2134173029.0,59469402.65384615,82083578.03846154,5,4,2.6666666666666665,0.3333333333333333,1.8333333333333333,0.16666666666666666,57.166666666666664,64.33333333333333,18.0,18.5,7.833333333333333,7.666666666666667,1.8333333333333333,2.1666666666666665,6.833333333333333,7.166666666666667,9.166666666666666,9.833333333333334,1.5,2.0,2.28,0.65,2.231666666666667,0.45,0,2,Regular,0.3,1.63,A
+102,2026-07-15,20:00,5,1,45,England,ENG,UEFA,37,Argentina,ARG,CONMEBOL,9,Atlanta Stadium (Mercedes-Benz Stadium),Atlanta,USA,71000,318.0,6,Danny Makkelie,3.8,4,1,2050.0,2150.0,0,0,27.273205917969776,29.11820144263676,853,1267,1321818896.0,1025039444.0,50839188.307692304,39424594.0,4,3,2.1666666666666665,1.0,2.8333333333333335,1.0,53.333333333333336,58.833333333333336,14.333333333333334,15.666666666666666,6.666666666666667,6.333333333333333,2.6666666666666665,1.8333333333333333,5.333333333333333,5.166666666666667,9.333333333333334,11.0,2.1666666666666665,2.3333333333333335,1.6733333333333331,1.105,2.14,0.71,,,,,,
+```
+
+## data\kaggle\match_team_stats.csv
+```python
+match_id,team_id,possession_pct,total_shots,shots_on_target,corners,fouls,offsides,saves,player_of_the_match,data_source,last_updated
+1,1,57,16,4,6,11,2,1,Julián Andrés Quinones,fifa.com,2026-06-24
+1,2,43,3,2,3,15,1,4,,fifa.com,2026-06-24
+2,3,54,12,5,4,10,1,2,Inbeom Hwang,sofascore.com,2026-06-24
+2,4,46,10,3,3,13,2,4,,sofascore.com,2026-06-24
+3,5,52,13,4,9,12,2,3,Ismaël Kenneth Jordan Kone,fifa.com,2026-06-24
+3,6,29,8,3,4,15,1,5,,fifa.com,2026-06-24
+4,13,59,16,6,3,13,2,1,Folarin Jolaoluwa Balogun,fifa.com,2026-06-24
+4,14,28,9,1,1,17,3,9,,fifa.com,2026-06-24
+5,7,28,6,3,3,12,1,4,Ibrahim Mahmoud Abunada,fifa.com,2026-06-24
+5,8,58,26,7,10,11,0,2,,fifa.com,2026-06-24
+6,9,55,12,5,6,16,0,3,José Vinicius,fifa.com,2026-06-24
+6,10,45,14,3,2,14,1,4,,fifa.com,2026-06-24
+7,11,44,14,1,5,12,2,5,,sofascore.com,2026-06-24
+7,12,56,12,3,6,10,3,2,John McGinn,sofascore.com,2026-06-24
+8,15,27,9,4,5,12,1,2,Nestory Irankunda,fifa.com,2026-06-24
+8,16,62,30,7,8,4,3,2,,fifa.com,2026-06-24
+9,17,63,25,12,8,10,1,1,Kai Lukas Havertz,sofascore.com,2026-06-24
+9,18,37,8,1,1,12,2,5,,sofascore.com,2026-06-24
+10,21,61,10,5,5,7,2,3,Virgil Van Dijk,fifa.com,2026-06-24
+10,22,39,9,5,4,7,1,3,,fifa.com,2026-06-24
+11,19,41,15,4,3,12,2,3,Yan Diomande,fifa.com,2026-06-24
+11,20,49,12,1,5,14,3,3,,fifa.com,2026-06-24
+12,23,49,13,7,4,10,3,1,Alexander Isak,fifa.com,2026-06-24
+12,24,51,6,2,2,8,1,6,,fifa.com,2026-06-24
+13,29,74,23,8,11,10,2,6,,fifa.com,2026-06-24
+13,30,26,6,1,1,1,3,7,José Vozinha,fifa.com,2026-06-24
+14,25,57,15,3,2,15,0,2,,fifa.com,2026-06-24
+14,26,43,14,3,7,15,1,2,Ashour Metwaly Emam,fifa.com,2026-06-24
+15,31,27,7,3,4,11,2,8,Khalil Mohammed Alowais,fifa.com,2026-06-24
+15,32,63,27,10,14,6,1,2,,fifa.com,2026-06-24
+16,27,43,17,4,4,10,2,5,Ramin Rezaeian,fifa.com,2026-06-24
+16,28,45,14,8,1,8,1,7,,fifa.com,2026-06-24
+17,33,49,11,8,6,5,2,2,Michael Akpovie Olise,fifa.com,2026-06-24
+17,34,44,6,2,4,9,1,4,,fifa.com,2026-06-24
+18,35,34,11,1,5,12,1,7,,fifa.com,2026-06-24
+18,36,57,11,5,4,13,0,1,Erling Braut Haaland,fifa.com,2026-06-24
+19,37,49,10,6,2,13,3,1,Lionel Andrés Messi,fifa.com,2026-06-24
+19,38,51,7,1,2,8,1,4,,fifa.com,2026-06-24
+20,39,53,10,4,4,12,3,1,,fifa.com,2026-06-24
+20,40,33,11,3,3,7,1,6,Iyad Ali Ali Olwan,fifa.com,2026-06-24
+21,41,68,7,1,5,9,3,5,Pedro Joao Neves,fifa.com,2026-06-24
+21,42,25,8,2,4,10,2,3,,fifa.com,2026-06-24
+22,45,48,22,11,8,10,2,4,Harry Edward Kane,fifa.com,2026-06-24
+22,46,43,10,5,2,12,3,6,,fifa.com,2026-06-24
+23,47,35,7,2,2,9,1,5,Antoine Serlom Semenyo,fifa.com,2026-06-24
+23,48,55,11,4,2,11,2,1,,fifa.com,2026-06-24
+24,43,33,8,2,3,14,2,6,,fifa.com,2026-06-24
+24,44,56,15,4,4,11,1,2,Luis Fernando Diaz,fifa.com,2026-06-24
+25,1,49,8,4,0,9,1,2,Luis Francisco Romo,fifa.com,2026-06-24
+25,3,51,9,2,2,7,2,3,,fifa.com,2026-06-24
+26,2,60,17,4,5,10,3,4,,fifa.com,2026-06-24
+26,4,32,14,3,5,12,1,3,Michal Sadilek,fifa.com,2026-06-24
+27,5,65,33,11,19,9,3,0,Jonathan Christian David,fifa.com,2026-06-24
+27,7,20,2,0,1,10,1,9,,fifa.com,2026-06-24
+28,6,34,5,3,3,17,1,5,,fifa.com,2026-06-24
+28,8,57,13,7,7,7,2,1,Johan Kula Manzambi,fifa.com,2026-06-24
+29,9,59,14,6,5,10,2,0,Matheus Matheus Cunha,sofascore.com,2026-06-24
+29,11,41,4,0,2,12,1,4,,sofascore.com,2026-06-24
+30,10,59,12,4,5,10,2,2,Ismael Saibari,sofascore.com,2026-06-24
+30,12,41,6,0,2,12,1,2,,sofascore.com,2026-06-24
+31,13,55,10,2,7,12,1,1,Folarin Jolaoluwa Balogun,fifa.com,2026-06-24
+31,15,30,5,2,4,16,0,2,,fifa.com,2026-06-24
+32,14,19,7,2,0,15,1,4,Matias Galarza,fifa.com,2026-06-24
+32,16,67,32,5,12,14,2,2,,fifa.com,2026-06-24
+33,17,59,16,8,8,7,1,2,Deniz Undav,fifa.com,2026-06-24
+33,19,41,9,3,3,8,2,6,,fifa.com,2026-06-24
+34,18,37,5,1,0,14,1,15,Eloy Victor Room,fifa.com,2026-06-24
+34,20,63,28,15,9,12,0,15,,fifa.com,2026-06-24
+35,21,48,10,7,7,11,2,2,Cody Mathès Gakpo,fifa.com,2026-06-24
+35,23,43,16,8,3,14,3,7,,fifa.com,2026-06-24
+36,22,62,14,5,5,15,1,1,Ayase Ueda,fifa.com,2026-06-24
+36,24,38,3,1,3,8,2,1,,fifa.com,2026-06-24
+37,25,59,23,8,4,7,1,2,,fifa.com,2026-06-24
+37,27,30,7,2,2,9,3,8,Ali Reza Beiranvand,fifa.com,2026-06-24
+38,26,50,19,7,4,8,1,2,Hamed Mahrous Mohamed Salah,fifa.com,2026-06-24
+38,28,39,11,3,4,14,2,4,,fifa.com,2026-06-24
+39,29,67,18,8,6,6,3,1,Mikel Oyarzabal,fifa.com,2026-06-24
+39,31,33,5,1,1,10,2,4,,fifa.com,2026-06-24
+40,30,35,12,4,4,4,1,5,José Vozinha,fifa.com,2026-06-24
+40,32,65,17,7,11,11,2,2,,fifa.com,2026-06-24
+41,33,56,19,5,4,8,2,0,Kylian Mbappe,fifa.com,2026-06-24
+41,35,44,4,0,2,4,1,2,,fifa.com,2026-06-24
+42,34,48,10,4,4,5,2,3,,fifa.com,2026-06-24
+42,36,52,12,6,5,13,1,2,Erling Braut Haaland,fifa.com,2026-06-24
+43,37,54,12,5,1,13,2,1,Lionel Andrés Messi,fifa.com,2026-06-24
+43,39,46,6,1,3,13,1,3,,fifa.com,2026-06-24
+44,38,71,18,6,7,9,2,1,Ibrahim Maza,fifa.com,2026-06-24
+44,40,29,6,2,2,12,1,4,,fifa.com,2026-06-24
+45,41,62,18,8,7,10,1,1,Ronaldo Cristiano Ronaldo,fifa.com,2026-06-25
+45,43,38,5,1,2,12,2,3,,fifa.com,2026-06-25
+46,42,42,8,2,3,14,1,3,,fifa.com,2026-06-25
+46,44,58,14,4,5,11,2,2,Daniel Munoz,fifa.com,2026-06-25
+47,45,59,11,3,6,8,2,2,Nico Oreilly,fifa.com,2026-06-25
+47,47,41,9,2,3,12,1,3,,fifa.com,2026-06-25
+48,46,56,15,4,5,10,1,1,Ante Budimir,fifa.com,2026-06-25
+48,48,44,7,1,2,14,2,3,,fifa.com,2026-06-25
+49,1,50,11,5,1,13,1,1,Mateo Chavez,sofascore.com,2026-06-25
+49,4,50,13,1,5,9,2,2,,sofascore.com,2026-06-25
+50,2,32,13,4,3,12,1,3,Thapelo Maseko,fifa.com,2026-06-25
+50,3,68,8,3,6,9,2,3,,fifa.com,2026-06-25
+51,5,45,13,7,5,10,3,2,,fifa.com,2026-06-25
+51,8,55,6,4,2,15,0,6,Johan Kula Manzambi,fifa.com,2026-06-25
+52,6,54,14,5,5,9,1,2,Kerim Alajbegovic,fifa.com,2026-06-25
+52,7,46,9,3,5,14,3,3,,fifa.com,2026-06-25
+53,9,65,18,9,6,8,3,2,José Vinicius,sofascore.com,2026-06-26
+53,12,35,6,2,2,12,1,6,,sofascore.com,2026-06-26
+54,10,62,21,9,7,10,3,3,Achraf Hakimi,sofascore.com,2026-06-26
+54,11,38,10,5,3,14,1,5,,sofascore.com,2026-06-26
+55,13,52,13,5,6,9,1,4,,sofascore.com,2026-06-26
+55,16,48,14,7,4,11,2,3,Arda Guler,sofascore.com,2026-06-26
+56,14,44,8,2,1,9,0,6,Roberto Junior Fernandez,fifa.com,2026-06-28
+56,15,56,12,5,3,6,0,3,,fifa.com,2026-06-28
+57,17,56,16,7,6,10,2,3,,sofascore.com,2026-06-27
+57,20,44,11,5,3,13,1,6,Nilson David Angulo,sofascore.com,2026-06-27
+58,18,41,7,2,2,14,1,5,,sofascore.com,2026-06-27
+58,19,59,16,7,6,11,3,2,Nicolas Pepe,sofascore.com,2026-06-27
+59,21,62,18,9,7,9,2,2,Brian Ebenezer Adjei Brobbey,sofascore.com,2026-06-27
+59,24,38,8,3,2,12,1,6,,sofascore.com,2026-06-27
+60,22,51,13,5,5,9,2,3,Daizen Maeda,sofascore.com,2026-06-27
+60,23,49,11,4,4,12,1,4,,sofascore.com,2026-06-27
+61,25,65,22,12,8,7,3,1,Leandro Trossard,sofascore.com,2026-06-28
+61,28,35,6,2,2,10,1,7,,sofascore.com,2026-06-28
+62,26,47,11,4,4,12,1,3,,sofascore.com,2026-06-28
+62,27,53,12,4,4,11,2,3,Ramin Rezaeian,sofascore.com,2026-06-28
+63,29,58,15,6,5,9,1,3,Alejandro Baena,sofascore.com,2026-06-28
+63,32,42,10,3,3,13,2,5,,sofascore.com,2026-06-28
+64,30,51,15,3,4,10,2,3,José Vozinha,fifa.com,2026-06-28
+64,31,49,6,3,2,16,0,6,,fifa.com,2026-06-28
+65,33,53,17,9,5,7,2,4,Masour Ousmane Dembele,sofascore.com,2026-06-28
+65,36,47,9,5,3,8,0,4,,sofascore.com,2026-06-28
+66,34,69,28,12,12,10,1,1,Iliman Cheikh Baroy Ndiaye,sofascore.com,2026-06-28
+66,35,31,6,1,3,11,0,7,,sofascore.com,2026-06-28
+67,37,73,12,4,6,7,0,0,Lionel Andrés Messi,sofascore.com,2026-06-28
+67,40,27,5,1,2,13,1,1,,sofascore.com,2026-06-28
+68,38,50,12,5,0,3,1,0,Riyad Karim Mahrez,sofascore.com,2026-06-28
+68,39,50,10,3,3,7,3,2,,sofascore.com,2026-06-28
+69,41,45,13,2,2,6,2,6,Diogo Diogo Costa,sofascore.com,2026-06-29
+69,44,55,24,6,5,12,3,2,,sofascore.com,2026-06-29
+70,42,64,19,4,2,6,3,1,Yoane Wissa,sofascore.com,2026-06-29
+70,43,36,3,1,4,16,1,1,,sofascore.com,2026-06-29
+71,45,67,17,6,7,13,4,2,Jude Victor William Bellingham,sofascore.com,2026-06-29
+71,48,33,13,2,3,16,4,4,,sofascore.com,2026-06-29
+72,46,53,8,4,3,9,1,0,Petar Sucic,sofascore.com,2026-06-29
+72,47,47,6,1,2,13,2,2,,sofascore.com,2026-06-29
+73,2,58,6,1,1,10,1,6,,sofascore.com,2026-06-29
+73,5,42,12,7,4,16,0,1,Stephen Eustaquio,sofascore.com,2026-06-29
+74,9,69,19,7,6,4,1,1,Henrique,sofascore.com,2026-06-30
+74,22,31,5,2,2,13,0,4,,sofascore.com,2026-06-30
+75,14,24,7,3,6,12,1,6,Orlando Daniel Gill,sofascore.com,2026-06-30
+75,17,76,21,6,16,18,4,2,,sofascore.com,2026-06-30
+76,10,70,11,5,8,15,0,1,Issa Laye Lucas Jean Diop,sofascore.com,2026-06-30
+76,21,30,6,2,5,18,3,5,,sofascore.com,2026-06-30
+77,19,52,14,5,14,6,2,1,,sofascore.com,2026-06-30
+77,36,48,9,3,3,7,2,4,Antonio Eromonsele Nordby Nusa,sofascore.com,2026-06-30
+78,23,39,8,3,1,10,1,9,,sofascore.com,2026-06-30
+78,33,61,25,12,9,14,3,3,Kylian Mbappe,sofascore.com,2026-06-30
+79,1,37,15,3,3,10,0,1,Julián Andrés Quinones,sofascore.com,2026-06-30
+79,20,52,7,1,8,14,1,1,,sofascore.com,2026-06-30
+80,42,40,7,2,3,12,4,5,,sofascore.com,2026-07-01
+80,45,60,16,7,5,10,0,1,Harry Edward Kane,sofascore.com,2026-07-01
+81,25,52,19,5,4,22,2,3,Youri Marion Tielemans,sofascore.com,2026-07-01
+81,34,48,19,5,2,12,2,2,,sofascore.com,2026-07-01
+82,6,52,10,3,3,13,0,0,,sofascore.com,2026-07-01
+82,13,48,8,2,4,7,3,3,Malik Leon Tillman,sofascore.com,2026-07-01
+83,29,64,23,10,9,8,2,0,Mikel Oyarzabal,sofascore.com,2026-07-03
+83,39,36,5,0,0,15,5,6,,sofascore.com,2026-07-03
+84,41,62,15,3,9,6,1,6,Ronaldo Cristiano Ronaldo,sofascore.com,2026-07-03
+84,46,38,13,7,5,11,4,1,,sofascore.com,2026-07-03
+85,8,45,11,5,4,10,0,2,Breel Donald Embolo,sofascore.com,2026-07-03
+85,38,55,8,2,2,12,2,3,,sofascore.com,2026-07-03
+86,15,42,11,3,4,14,2,4,,sofascore.com,2026-07-04
+86,26,58,16,5,6,12,1,2,Hamed Mahrous Mohamed Salah,sofascore.com,2026-07-04
+87,30,36,16,5,3,13,1,8,,sofascore.com,2026-07-04
+87,37,64,22,11,8,9,3,3,Lionel Andrés Messi,sofascore.com,2026-07-04
+88,44,61,20,8,3,13,2,0,Jhon Adolfo Arias,sofascore.com,2026-07-04
+88,47,39,8,0,2,9,0,7,,sofascore.com,2026-07-04
+89,14,24,5,1,2,13,0,4,Orlando Daniel Gill,sofascore.com,2026-07-04
+89,33,76,15,5,12,11,0,1,,sofascore.com,2026-07-04
+90,5,37,10,3,7,24,2,1,,sofascore.com,2026-07-04
+90,10,50,5,4,1,14,3,3,Azz-Eddine Ounahi,sofascore.com,2026-07-04
+91,9,34,14,4,5,7,1,3,,sofascore.com,2026-07-06
+91,36,66,9,5,5,6,1,4,Erling Braut Haaland,sofascore.com,2026-07-06
+92,1,67,20,5,12,14,1,2,,sofascore.com,2026-07-06
+92,45,33,6,5,2,7,0,3,Jude Victor William Bellingham,sofascore.com,2026-07-06
+93,29,55,15,6,7,13,1,2,Mikel Merino,sofascore.com,2026-07-06
+93,41,45,10,2,3,9,2,5,,sofascore.com,2026-07-06
+94,13,56,7,2,3,11,0,3,,sofascore.com,2026-07-07
+94,25,44,15,7,5,9,1,1,Charles De Ketelaere,sofascore.com,2026-07-07
+95,26,46,11,4,4,14,1,2,,sofascore.com,2026-07-08
+95,37,54,15,5,6,10,2,2,Lionel Messi,sofascore.com,2026-07-08
+96,8,43,11,3,5,15,1,5,Gregor Kobel,sofascore.com,2026-07-08
+96,44,57,18,5,8,12,2,3,,sofascore.com,2026-07-08
+97,33,48,21,8,5,10,0,1,Kylian Mbappe,Sofascore,2026-07-09
+97,10,52,5,1,5,12,0,5,,Sofascore,2026-07-09
+98,29,68,17,8,5,13,3,1,Lamine Yamal Yamal,fifa.com,2026-07-11
+98,25,32,5,2,1,18,1,6,,fifa.com,2026-07-11
+99,36,47,13,5,7,10,1,6,,Sofascore,2026-07-12
+99,45,53,14,8,4,8,5,4,Jude Victor William Bellingham,Sofascore,2026-07-12
+100,37,59,23,7,8,14,4,4,Julián Alvarez,Sofascore,2026-07-12
+100,8,41,13,5,2,18,3,4,,Sofascore,2026-07-12
+101,33,42,10,3,2,9,4,0,,Sofascore,2026-07-14
+101,29,58,10,2,1,9,5,3,Pedro Antonio Porro,Sofascore,2026-07-14
+```
+
+## data\kaggle\matches.csv
+```python
+match_id,date,kickoff_time_utc,stage_id,venue_id,home_team_id,away_team_id,home_score,away_score,home_penalty_score,away_penalty_score,status,result_type,home_xg,away_xg,referee_id,player_of_the_match_id
+1,2026-06-11,19:00,1,1,1,2,2,0,,,Completed,Regular,1.84,0.52,1,16
+2,2026-06-11,23:00,1,7,3,4,2,1,,,Completed,Regular,1.45,1.12,2,58
+3,2026-06-12,19:00,1,6,5,6,1,1,,,Completed,Regular,1.35,0.98,3,112
+4,2026-06-12,23:00,1,3,13,14,4,1,,,Completed,Regular,2.76,0.88,4,332
+5,2026-06-13,15:00,1,10,7,8,1,1,,,Completed,Regular,0.78,1.54,5,157
+6,2026-06-13,18:00,1,2,9,10,1,1,,,Completed,Regular,1.62,1.1,6,215
+7,2026-06-13,21:00,1,14,11,12,0,1,,,Completed,Regular,1.25,0.65,7,293
+8,2026-06-13,23:59,1,16,15,16,2,0,,,Completed,Regular,1.48,0.72,8,381
+9,2026-06-14,15:00,1,9,17,18,7,1,,,Completed,Regular,4.82,0.44,9,423
+10,2026-06-14,18:00,1,15,21,22,2,2,,,Completed,Regular,1.95,1.82,10,524
+11,2026-06-14,21:00,1,11,19,20,1,0,,,Completed,Regular,1.1,0.95,11,479
+12,2026-06-14,23:59,1,12,23,24,5,1,,,Completed,Regular,3.12,0.78,12,581
+13,2026-06-15,15:00,1,13,29,30,0,0,,,Completed,Regular,2.15,0.35,13,755
+14,2026-06-15,18:00,1,4,25,26,1,1,,,Completed,Regular,1.58,1.12,14,658
+15,2026-06-15,21:00,1,8,31,32,1,1,,,Completed,Regular,0.85,1.76,15,801
+16,2026-06-15,23:59,1,5,27,28,2,2,,,Completed,Regular,1.88,1.2,16,699
+17,2026-06-16,15:00,1,2,33,34,3,1,,,Completed,Regular,2.44,1.05,1,843
+18,2026-06-16,18:00,1,10,35,36,1,4,,,Completed,Regular,0.68,2.85,2,919
+19,2026-06-16,21:00,1,3,37,38,3,0,,,Completed,Regular,2.65,0.42,3,946
+20,2026-06-16,23:59,1,15,39,40,3,1,,,Completed,Regular,1.98,0.88,4,1023
+21,2026-06-17,15:00,1,9,41,42,1,1,,,Completed,Regular,1.78,1.15,5,1055
+22,2026-06-17,18:00,1,13,45,46,4,2,,,Completed,Regular,2.92,1.64,6,1153
+23,2026-06-17,21:00,1,11,47,48,1,0,,,Completed,Regular,1.3,0.75,7,1207
+24,2026-06-17,23:59,1,16,43,44,1,3,,,Completed,Regular,0.95,2.1,8,1125
+25,2026-06-18,15:00,1,9,1,3,1,0,,,Completed,Regular,1.62,0.58,9,7
+26,2026-06-18,18:00,1,3,4,2,1,1,,,Completed,Regular,1.35,1.15,10,96
+27,2026-06-18,21:00,1,5,5,7,6,0,,,Completed,Regular,3.82,0.22,11,114
+28,2026-06-18,23:59,1,1,8,6,4,1,,,Completed,Regular,2.45,0.88,12,191
+29,2026-06-19,15:00,1,2,9,11,3,0,,,Completed,Regular,1.16,0.9,13,217
+30,2026-06-19,18:00,1,4,12,10,0,1,,,Completed,Regular,0.97,0.54,14,245
+31,2026-06-19,21:00,1,6,13,15,2,0,,,Completed,Regular,1.21,0.32,15,332
+32,2026-06-19,23:59,1,8,16,14,0,1,,,Completed,Regular,0.4,0.3,16,361
+33,2026-06-20,15:00,1,10,17,19,2,1,,,Completed,Regular,1.85,0.72,1,442
+34,2026-06-20,18:00,1,12,20,18,0,0,,,Completed,Regular,1.92,0.08,2,443
+35,2026-06-20,21:00,1,14,21,23,5,1,,,Completed,Regular,3.45,0.88,3,531
+36,2026-06-20,23:59,1,16,24,22,0,4,,,Completed,Regular,0.35,3.12,4,564
+37,2026-06-21,15:00,1,11,25,27,0,0,,,Completed,Regular,1.45,0.62,5,677
+38,2026-06-21,18:00,1,13,28,26,1,3,,,Completed,Regular,0.55,2.15,6,660
+39,2026-06-21,21:00,1,15,29,31,4,0,,,Completed,Regular,3.28,0.25,7,749
+40,2026-06-21,23:59,1,2,32,30,2,2,,,Completed,Regular,1.65,1.1,8,755
+41,2026-06-22,15:00,1,4,33,35,3,0,,,Completed,Regular,2.21,0.45,9,842
+42,2026-06-22,18:00,1,6,36,34,3,2,,,Completed,Regular,1.95,1.48,10,919
+43,2026-06-22,21:00,1,8,37,39,2,0,,,Completed,Regular,1.78,0.55,11,946
+44,2026-06-22,23:59,1,10,40,38,1,2,,,Completed,Regular,0.88,1.92,12,984
+45,2026-06-23,15:00,1,12,41,43,5,0,,,Completed,Regular,3.54,0.42,13,1047
+46,2026-06-23,18:00,1,14,44,42,1,0,,,Completed,Regular,1.62,0.58,14,1120
+47,2026-06-23,21:00,1,16,45,47,0,0,,,Completed,Regular,1.12,0.89,15,1147
+48,2026-06-23,23:59,1,1,48,46,0,1,,,Completed,Regular,0.42,1.48,16,1181
+49,2026-06-24,18:00,1,1,4,1,0,3,,,Completed,Regular,1.1,1.27,1,20
+50,2026-06-24,18:00,1,7,2,3,1,0,,,Completed,Regular,1.26,1.39,2,38
+51,2026-06-24,22:00,1,5,8,5,2,1,,,Completed,Regular,0.71,1.35,3,191
+52,2026-06-24,22:00,1,6,6,7,3,1,,,Completed,Regular,1.48,0.95,4,149
+53,2026-06-25,18:00,1,2,12,9,0,3,,,Completed,Regular,0.45,2.18,5,215
+54,2026-06-25,18:00,1,10,10,11,4,2,,,Completed,Regular,2.35,1.12,6,236
+55,2026-06-25,22:00,1,3,16,13,3,2,,,Completed,Regular,1.62,1.45,7,398
+56,2026-06-25,22:00,1,15,14,15,0,0,,,Completed,Regular,0.55,0.48,8,339
+57,2026-06-26,18:00,1,9,20,17,2,1,,,Completed,Regular,1.28,1.55,9,514
+58,2026-06-26,18:00,1,11,18,19,0,2,,,Completed,Regular,0.32,1.68,10,487
+59,2026-06-26,22:00,1,12,24,21,1,3,,,Completed,Regular,0.62,2.15,11,539
+60,2026-06-26,22:00,1,16,22,23,1,1,,,Completed,Regular,1.12,0.95,12,557
+61,2026-06-27,18:00,1,4,28,25,1,5,,,Completed,Regular,0.48,3.25,13,634
+62,2026-06-27,18:00,1,8,26,27,1,1,,,Completed,Regular,0.85,0.92,14,699
+63,2026-06-27,22:00,1,13,32,29,0,1,,,Completed,Regular,0.78,1.35,15,743
+64,2026-06-27,22:00,1,14,30,31,0,0,,,Completed,Regular,0.42,0.38,16,755
+65,2026-06-26,18:00,1,10,36,33,1,4,,,Completed,Regular,1.3,0.96,1,839
+66,2026-06-26,18:00,1,2,34,35,5,0,,,Completed,Regular,3.01,0.14,2,871
+67,2026-06-27,22:00,1,15,40,37,1,3,,,Completed,Regular,0.76,2.13,3,946
+68,2026-06-27,22:00,1,3,38,39,3,3,,,Completed,Regular,1.62,1.44,4,969
+69,2026-06-28,18:00,1,13,44,41,0,0,,,Completed,Regular,1.62,0.73,5,1041
+70,2026-06-28,18:00,1,9,42,43,3,1,,,Completed,Regular,2.35,0.2,6,1086
+71,2026-06-28,22:00,1,2,48,45,0,2,,,Completed,Regular,0.69,1.39,7,1154
+72,2026-06-28,22:00,1,14,46,47,2,1,,,Completed,Regular,0.42,0.74,8,1187
+73,2026-06-29,12:00,2,3,2,5,0,1,,,Completed,Regular,0.13,1.32,17,111
+74,2026-06-29,23:00,2,11,9,22,2,1,,,Completed,Regular,1.69,0.23,18,213
+75,2026-06-30,02:30,2,10,17,14,1,1,3,4,Completed,Penalties,0.72,0.42,19,350
+76,2026-06-30,07:00,2,8,21,10,1,1,2,3,Completed,Penalties,0.23,1.4,8,248
+77,2026-06-30,23:00,2,4,19,36,1,2,,,Completed,Regular,1.15,2.02,7,930
+78,2026-07-01,03:00,2,2,33,23,3,0,,,Completed,Regular,3.17,0.67,6,842
+79,2026-07-01,07:00,2,1,1,20,2,0,,,Completed,Regular,1.02,0.73,20,16
+80,2026-07-01,22:00,2,9,45,42,2,1,,,Completed,Regular,2.04,0.76,21,1153
+81,2026-07-02,02:00,2,16,25,34,3,2,,,Completed,AET,1.74,3.58,22,632
+82,2026-07-02,06:00,2,15,13,6,2,0,,,Completed,Regular,0.92,0.25,23,329
+83,2026-07-03,01:00,2,3,29,39,3,0,,,Completed,Regular,2.84,0.32,24,749
+84,2026-07-03,05:00,2,6,41,46,2,1,,,Completed,Regular,2.18,1.34,25,1047
+85,2026-07-03,09:00,2,5,8,38,2,0,,,Completed,Regular,2.52,0.73,26,189
+86,2026-07-04,00:00,2,4,15,26,1,1,2,4,Completed,Penalties,0.87,1.36,27,660
+87,2026-07-04,04:00,2,13,37,30,3,2,,,Completed,AET,2.16,0.46,28,946
+88,2026-07-04,07:30,2,12,44,47,1,0,,,Completed,Regular,2.19,0.26,5,1129
+89,2026-07-04,21:00,3,14,14,33,0,1,,,Completed,Regular,0.3,1.8,13,350
+90,2026-07-04,23:00,3,11,5,10,0,3,,,Completed,Regular,0.8,1.2,3,242
+91,2026-07-05,20:00,3,4,9,36,1,2,,,Completed,Regular,2.61,1.05,14,919
+92,2026-07-06,01:00,3,1,1,45,2,3,,,Completed,Regular,1.88,1.61,14,1154
+93,2026-07-06,19:00,3,13,41,29,0,1,,,Completed,Regular,0.63,1.69,4,734
+94,2026-07-07,00:00,3,15,13,25,1,4,,,Completed,Regular,0.67,2.15,9,641
+95,2026-07-07,16:00,3,12,37,26,3,2,,,Completed,Regular,2.12,1.54,1,946
+96,2026-07-07,20:00,3,16,8,44,0,0,4,3,Completed,Penalties,1.15,1.46,10,183
+97,2026-07-09,20:00,4,10,33,10,2,0,,,Completed,Regular,3.1,0.13,16,842
+98,2026-07-10,19:00,4,3,29,25,2,1,,,Completed,Regular,2.08,0.37,3,747
+99,2026-07-11,21:00,4,13,36,45,1,2,,,Completed,AET,0.77,0.96,5,1154
+100,2026-07-12,01:00,4,12,37,8,3,1,,,Completed,AET,2.0,0.53,17,945
+101,2026-07-14,20:00,5,4,33,29,0,2,,,Completed,Regular,0.3,1.63,10,740
+102,2026-07-15,20:00,5,9,45,37,,,,,Scheduled,,,,6,
+103,2026-07-18,22:00,6,13,,,,,,,Scheduled,,,,7,
+104,2026-07-19,20:00,7,2,,,,,,,Scheduled,,,,8,
+```
+
+## data\kaggle\player_stats.csv
+```python
+player_id,player_name,team_id,position,matches_played,matches_started,minutes_played,goals,assists,shots,shots_on_target,yellow_cards,red_cards,penalty_goals,own_goals,clean_sheets,saves,goals_conceded,average_rating,data_source,last_verified
+1,José Raúl Rangel,1,GK,5,5,438,0,0,,,0,0,0,0,4,7,3,,sofascore.com,2026-07-14
+2,Jorge Eduardo Sanchez,1,DEF,4,4,349,0,1,,,1,0,0,0,,,,,sofascore.com,2026-07-14

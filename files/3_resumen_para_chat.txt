@@ -1,0 +1,1278 @@
+3
+
+    deleted = conn.execute(
+        f"DELETE FROM {table} WHERE home_team = ? AND away_team = ? AND bookmaker = ?",
+        (home, away, bookmaker),
+    ).rowcount
+    for line, sides in sorted(lines_found.items()):
+        odd_over = sides.get("over")
+        odd_under = sides.get("under")
+        conn.execute(
+            f"INSERT INTO {table} (home_team, away_team, bookmaker, line, odd_over, odd_under, last_update) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (home, away, bookmaker, line, odd_over, odd_under, now),
+        )
+        print(f"  [{label} · {bookmaker}] {line}: Over {odd_over} / Under {odd_under}")
+    print(f"  [{label} · {bookmaker}] {deleted} fila(s) vieja(s) borrada(s), {len(lines_found)} línea(s) nueva(s)")
+
+
+def process_file(conn, path):
+    rows = load_csv_rows(path)
+    if not rows:
+        print(f"  [vacio] {path.name}")
+        return
+
+    home = rows[0]["home_team"].strip()
+    away = rows[0]["away_team"].strip()
+    bookmaker = detect_bookmaker(path.name)
+    now = datetime.now().isoformat()
+
+    print(f"  Casa de apuestas detectada: {bookmaker}")
+
+    # --- 1X2 ---
+    result_rows = [r for r in rows if normalize_market(r["market"]) == MATCH_RESULT_MARKET]
+    if result_rows:
+        odds = {r["selection"].strip(): float(r["odd"]) for r in result_rows}
+        odd_home = odds.get(home)
+        odd_draw = odds.get("Draw") or odds.get("Empate")
+        odd_away = odds.get(away)
+        if odd_home and odd_draw and odd_away:
+            deleted = conn.execute(
+                "DELETE FROM match_odds WHERE home_team = ? AND away_team = ? AND bookmaker = ?",
+                (home, away, bookmaker),
+            ).rowcount
+            conn.execute(
+                "INSERT INTO match_odds (home_team, away_team, bookmaker, odd_home, odd_draw, odd_away, last_update) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (home, away, bookmaker, odd_home, odd_draw, odd_away, now),
+            )
+            print(f"  [1X2 · {bookmaker}] actualizado ({deleted} fila(s) vieja(s) borrada(s)): "
+                  f"{home} {odd_home} / Empate {odd_draw} / {away} {odd_away}")
+        else:
+            print(f"  [!] 1X2 incompleto para {home} vs {away} ({bookmaker}), se omite (revisa el CSV)")
+            print(f"      Detectado: home={odd_home}, draw={odd_draw}, away={odd_away}")
+            print(f"      Selections en el CSV: {list(odds.keys())}")
+    else:
+        print(f"  [1X2] sin filas 'Resultado del partido' en el CSV, se omite")
+
+    # --- Goles / Corners / Tarjetas (Over/Under) ---
+    process_over_under_market(conn, "goals_odds", home, away, bookmaker, rows, GOALS_KEYWORDS, now, "Goles")
+    process_over_under_market(conn, "corners_odds", home, away, bookmaker, rows, CORNERS_KEYWORDS, now, "Corners")
+    process_over_under_market(conn, "cards_odds", home, away, bookmaker, rows, CARDS_KEYWORDS, now, "Tarjetas")
+
+    # --- Ambos anotan (BTTS) ---
+    btts_rows = [r for r in rows if any(k in normalize_market(r["market"]) for k in BTTS_KEYWORDS)]
+    if btts_rows:
+        selections = {r["selection"].strip().lower(): float(r["odd"]) for r in btts_rows}
+        odd_yes = selections.get("si") or selections.get("sí") or selections.get("yes")
+        odd_no = selections.get("no")
+        if odd_yes:
+            conn.execute(
+                "DELETE FROM btts_odds WHERE home_team = ? AND away_team = ? AND bookmaker = ?",
+                (home, away, bookmaker),
+            )
+            conn.execute(
+                "INSERT INTO btts_odds (home_team, away_team, bookmaker, odd_yes, odd_no, last_update) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (home, away, bookmaker, odd_yes, odd_no, now),
+            )
+            print(f"  [BTTS · {bookmaker}] Si: {odd_yes} / No: {odd_no}")
+        else:
+            print(f"  [!] BTTS encontrado pero no se pudo parsear 'Si'/'No', selections: {list(selections.keys())}")
+    else:
+        print(f"  [BTTS] sin filas en el CSV, se omite")
+
+    conn.commit()
+    print(f"  OK — {home} vs {away} ({bookmaker})\n")
+
+
+def main():
+    conn = sqlite3.connect(DB_PATH)
+    ensure_tables(conn)
+
+    if len(sys.argv) > 1:
+        files = [ODDS_DIR / sys.argv[1]]
+    else:
+        files = sorted(ODDS_DIR.glob("*.csv"))
+
+    if not files:
+        print(f"No se encontraron CSV en {ODDS_DIR}/")
+        conn.close()
+        return
+
+    for path in files:
+        if not path.exists():
+            print(f"[!] No existe: {path}")
+            continue
+        print(f"Procesando {path.name}...")
+        process_file(conn, path)
+
+    conn.close()
+    print("Listo.")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## data\load_odds_generic.py
+```python
+"""
+Carga cuotas reales desde un CSV genérico (exportado por Gemini/Claude en Chrome
+u otra fuente) a data/db.sqlite. Formato esperado del CSV:
+
+home_team,away_team,market,selection,odd
+
+Carga: 1x2 (match_odds), goles over/under (goals_odds), córners over/under
+(corners_odds), tarjetas over/under (cards_odds), ambos anotan (btts_odds).
+
+Uso: python data/load_odds_generic.py <archivo.csv>
+"""
+
+import csv
+import re
+import sys
+import sqlite3
+from collections import defaultdict
+from datetime import datetime
+
+DB_PATH = "data/db.sqlite"
+
+MERCADOS_1X2 = {"resultado del partido"}
+MERCADOS_GOLES = {"goles totales más/menos", "goles totales mas/menos"}
+MERCADOS_CORNERS = {"córners más/menos", "corners más/menos", "corners mas/menos"}
+MERCADOS_TARJETAS = {"tarjetas totales más/menos", "tarjetas totales mas/menos"}
+MERCADOS_BTTS = {"ambos equipos anotan"}
+
+
+def to_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def es_local(selection, home):
+    s = selection.strip().lower()
+    return s == home.strip().lower() or s in ("1", "(1)") or home.strip().lower() in s
+
+
+def es_visita(selection, away):
+    s = selection.strip().lower()
+    return s == away.strip().lower() or s in ("2", "(2)") or away.strip().lower() in s
+
+
+def es_empate(selection):
+    return selection.strip().lower() in ("draw", "empate", "x", "(x)")
+
+
+def es_si(selection):
+    return selection.strip().lower() in ("yes", "sí", "si")
+
+
+def es_no(selection):
+    return selection.strip().lower() == "no"
+
+
+def parse_over_under(filas_mercado):
+    """Agrupa filas de un mercado over/under por línea numérica."""
+    por_linea = defaultdict(dict)
+    for market, selection, odd in filas_mercado:
+        match = re.search(r"(\d+\.?\d*)", selection)
+        if not match:
+            continue
+        line = float(match.group(1))
+        sel_lower = selection.lower()
+        if "over" in sel_lower or "más" in sel_lower or "mas" in sel_lower:
+            por_linea[line]["over"] = odd
+        elif "under" in sel_lower or "menos" in sel_lower:
+            por_linea[line]["under"] = odd
+    return por_linea
+
+
+def setup_tables(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS match_odds (
+        home_team TEXT, away_team TEXT, odd_home REAL, odd_draw REAL, odd_away REAL,
+        bookmakers_count INTEGER, last_update TEXT)""")
+    for tabla in ("goals_odds", "corners_odds", "cards_odds"):
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS {tabla} (
+            home_team TEXT, away_team TEXT, line REAL, odd_over REAL, odd_under REAL, last_update TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS btts_odds (
+        home_team TEXT, away_team TEXT, odd_yes REAL, odd_no REAL, last_update TEXT)""")
+
+
+def guardar_over_under(conn, tabla, home, away, por_linea, now):
+    n = 0
+    for line, valores in por_linea.items():
+        if "over" in valores and "under" in valores:
+            conn.execute(f"DELETE FROM {tabla} WHERE home_team=? AND away_team=? AND line=?", (home, away, line))
+            conn.execute(f"""INSERT INTO {tabla} (home_team, away_team, line, odd_over, odd_under, last_update)
+                VALUES (?, ?, ?, ?, ?, ?)""", (home, away, line, valores["over"], valores["under"], now))
+            n += 1
+    return n
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("Uso: python data/load_odds_generic.py <archivo.csv>")
+        return
+
+    with open(sys.argv[1], encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        print("[!] El CSV está vacío.")
+        return
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_PATH)
+    setup_tables(conn)
+
+    partidos = defaultdict(list)
+    for r in rows:
+        partidos[(r["home_team"].strip(), r["away_team"].strip())].append(r)
+
+    resumen = defaultdict(int)
+
+    for (home, away), filas in partidos.items():
+        odd_home = odd_draw = odd_away = None
+        odd_yes = odd_no = None
+        filas_goles, filas_corners, filas_tarjetas = [], [], []
+
+        for r in filas:
+            market = r["market"].strip().lower()
+            selection = r["selection"].strip()
+            odd = to_float(r["odd"])
+            if odd is None:
+                continue
+
+            if market in MERCADOS_1X2:
+                if es_empate(selection):
+                    odd_draw = odd
+                elif es_local(selection, home):
+                    odd_home = odd
+                elif es_visita(selection, away):
+                    odd_away = odd
+            elif market in MERCADOS_GOLES:
+                filas_goles.append((market, selection, odd))
+            elif market in MERCADOS_CORNERS:
+                filas_corners.append((market, selection, odd))
+            elif market in MERCADOS_TARJETAS:
+                filas_tarjetas.append((market, selection, odd))
+            elif market in MERCADOS_BTTS:
+                if es_si(selection):
+                    odd_yes = odd
+                elif es_no(selection):
+                    odd_no = odd
+
+        if odd_home and odd_draw and odd_away:
+            conn.execute("DELETE FROM match_odds WHERE home_team=? AND away_team=?", (home, away))
+            conn.execute("""INSERT INTO match_odds VALUES (?, ?, ?, ?, ?, 1, ?)""",
+                         (home, away, odd_home, odd_draw, odd_away, now))
+            resumen["1x2"] += 1
+
+        resumen["goles"] += guardar_over_under(conn, "goals_odds", home, away, parse_over_under(filas_goles), now)
+        resumen["corners"] += guardar_over_under(conn, "corners_odds", home, away, parse_over_under(filas_corners), now)
+        resumen["tarjetas"] += guardar_over_under(conn, "cards_odds", home, away, parse_over_under(filas_tarjetas), now)
+
+        if odd_yes and odd_no:
+            conn.execute("DELETE FROM btts_odds WHERE home_team=? AND away_team=?", (home, away))
+            conn.execute("INSERT INTO btts_odds VALUES (?, ?, ?, ?, ?)", (home, away, odd_yes, odd_no, now))
+            resumen["btts"] += 1
+
+    conn.commit()
+    conn.close()
+    print(f"Cargado: {dict(resumen)}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## data\load_players.py
+```python
+"""
+Carga los datasets de jugadores del Mundial 2026 (Kaggle: FIFA World Cup 2026
+Dataset - Live & Updated Stats) a data/db.sqlite, tabla `players`.
+
+Requiere: squads_and_players.csv y player_stats.csv en la carpeta data/kaggle/
+(o ajusta las rutas abajo).
+
+Uso: python data/load_players.py
+"""
+
+import csv
+import sqlite3
+
+DB_PATH = "data/db.sqlite"
+SQUADS_CSV = "data/kaggle/squads_and_players.csv"
+STATS_CSV = "data/kaggle/player_stats.csv"
+
+# Mapeo team_id -> nombre de selección, extraído de match_prediction_features.csv
+TEAM_NAMES = {
+    "1": "Mexico", "2": "South Africa", "3": "South Korea", "4": "Czechia",
+    "5": "Canada", "6": "Bosnia and Herzegovina", "7": "Qatar", "8": "Switzerland",
+    "9": "Brazil", "10": "Morocco", "11": "Haiti", "12": "Scotland",
+    "13": "United States", "14": "Paraguay", "15": "Australia", "16": "Türkiye",
+    "17": "Germany", "18": "Curaçao", "19": "Côte d'Ivoire", "20": "Ecuador",
+    "21": "Netherlands", "22": "Japan", "23": "Sweden", "24": "Tunisia",
+    "25": "Belgium", "26": "Egypt", "27": "IR Iran", "28": "New Zealand",
+    "29": "Spain", "30": "Cabo Verde", "31": "Saudi Arabia", "32": "Uruguay",
+    "33": "France", "34": "Senegal", "35": "Iraq", "36": "Norway",
+    "37": "Argentina", "38": "Algeria", "39": "Austria", "40": "Jordan",
+    "41": "Portugal", "42": "Congo DR", "43": "Uzbekistan", "44": "Colombia",
+    "45": "England", "46": "Croatia", "47": "Ghana", "48": "Panama",
+}
+
+
+def read_csv(path):
+    with open(path, encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def to_float(value):
+    try:
+        return float(value) if value not in (None, "") else None
+    except ValueError:
+        return None
+
+
+def to_int(value):
+    try:
+        return int(float(value)) if value not in (None, "") else None
+    except ValueError:
+        return None
+
+
+def setup_table(conn):
+    conn.execute("DROP TABLE IF EXISTS players")
+    conn.execute("""
+        CREATE TABLE players (
+            player_id INTEGER PRIMARY KEY,
+            player_name TEXT,
+            team_id INTEGER,
+            team_name TEXT,
+            position TEXT,
+            club_team TEXT,
+            market_value_eur INTEGER,
+            caps INTEGER,
+            date_of_birth TEXT,
+            height_cm INTEGER,
+            matches_played INTEGER,
+            matches_started INTEGER,
+            minutes_played INTEGER,
+            goals INTEGER,
+            assists INTEGER,
+            shots INTEGER,
+            shots_on_target INTEGER,
+            yellow_cards INTEGER,
+            red_cards INTEGER,
+            average_rating REAL,
+            clean_sheets INTEGER,
+            saves INTEGER,
+            goals_conceded INTEGER
+        )
+    """)
+
+
+def main():
+    squads = {row["player_id"]: row for row in read_csv(SQUADS_CSV)}
+    stats = {row["player_id"]: row for row in read_csv(STATS_CSV)}
+
+    conn = sqlite3.connect(DB_PATH)
+    setup_table(conn)
+
+    rows = []
+    all_ids = set(squads) | set(stats)
+    for pid in all_ids:
+        sq = squads.get(pid, {})
+        st = stats.get(pid, {})
+        team_id = sq.get("team_id") or st.get("team_id")
+        rows.append((
+            to_int(pid),
+            sq.get("player_name") or st.get("player_name"),
+            to_int(team_id),
+            TEAM_NAMES.get(team_id, "Desconocido"),
+            sq.get("position") or st.get("position"),
+            sq.get("club_team"),
+            to_int(sq.get("market_value_eur")),
+            to_int(sq.get("caps")),
+            sq.get("date_of_birth"),
+            to_int(sq.get("height_cm")),
+            to_int(st.get("matches_played")),
+            to_int(st.get("matches_started")),
+            to_int(st.get("minutes_played")),
+            to_int(st.get("goals")),
+            to_int(st.get("assists")),
+            to_int(st.get("shots")),
+            to_int(st.get("shots_on_target")),
+            to_int(st.get("yellow_cards")),
+            to_int(st.get("red_cards")),
+            to_float(st.get("average_rating")),
+            to_int(st.get("clean_sheets")),
+            to_int(st.get("saves")),
+            to_int(st.get("goals_conceded")),
+        ))
+
+    conn.executemany("""
+        INSERT INTO players (
+            player_id, player_name, team_id, team_name, position, club_team,
+            market_value_eur, caps, date_of_birth, height_cm,
+            matches_played, matches_started, minutes_played, goals, assists,
+            shots, shots_on_target, yellow_cards, red_cards, average_rating,
+            clean_sheets, saves, goals_conceded
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, rows)
+    conn.commit()
+    conn.close()
+    print(f"[OK] {len(rows)} jugadores cargados en la tabla players.")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## data\manual_odds\france_england.csv
+```python
+home_team,away_team,market,selection,odd
+France,England,Resultado del partido SuperCuotas,France,1.88
+France,England,Resultado del partido SuperCuotas,Draw,4.10
+France,England,Resultado del partido SuperCuotas,England,4.00
+France,England,Resultado del partido,France,1.85
+France,England,Resultado del partido,Draw,3.95
+France,England,Resultado del partido,England,3.85
+France,England,3er Puesto,France,1.45
+France,England,3er Puesto,England,2.75
+France,England,Método de triunfo,France in regular time,1.85
+France,England,Método de triunfo,England in regular time,3.85
+France,England,Método de triunfo,France in extra time,10.00
+France,England,Método de triunfo,England in extra time,17.00
+France,England,Método de triunfo,France on penalties,15.00
+France,England,Método de triunfo,England on penalties,15.00
+France,England,Goles totales Más/Menos,Over 3.5,2.10
+France,England,Goles totales Más/Menos,Under 3.5,1.75
+France,England,Goles totales Más/Menos,Over 2.5,1.47
+France,England,Goles totales Más/Menos,Under 2.5,2.72
+France,England,Goles totales Más/Menos,Over 4.5,3.45
+France,England,Goles totales Más/Menos,Under 4.5,1.32
+France,England,20% SÚPER MEJORADAS,"Over 2.5 Cards, Over 8.5 Corners, Over 3.5 Goals",7.56
+France,England,20% SÚPER MEJORADAS,"O. Dembele 1+ SOT, France Win, Over 3.5 Goals",4.68
+France,England,10% MEJORADAS,"Over 2.5 Cards, K. Mbappe 2+ SOT, France Win",5.50
+France,England,10% MEJORADAS,"Over 8.5 Corners, Over 3.5 Goals, B. Saka 1+ SOT",7.04
+France,England,10% MEJORADAS,"France Win, D. Henderson 4+ Saves, Over 9.5 Corners",7.37
+```
+
+## data\manual_odds\spain_argentina_betano.csv
+```python
+home_team,away_team,market,selection,odd
+Spain,Argentina,Resultado del partido,Spain,2.37
+Spain,Argentina,Resultado del partido,Draw,2.90
+Spain,Argentina,Resultado del partido,Argentina,3.50
+Spain,Argentina,Goles totales,Over 2.5,2.22
+Spain,Argentina,Goles totales,Under 2.5,1.67
+Spain,Argentina,Goles totales,Over 1.5,1.42
+Spain,Argentina,Goles totales,Under 1.5,2.92
+Spain,Argentina,Goles totales,Over 3.5,3.90
+Spain,Argentina,Goles totales,Under 3.5,1.26
+Spain,Argentina,Corners totales,Over 7.5,1.67
+Spain,Argentina,Corners totales,Under 7.5,2.12
+Spain,Argentina,Corners totales,Over 6.5,1.36
+Spain,Argentina,Corners totales,Under 6.5,3.00
+Spain,Argentina,Corners totales,Over 8.5,2.15
+Spain,Argentina,Corners totales,Under 8.5,1.65
+Spain,Argentina,Tarjetas totales,Over 3.5,1.70
+Spain,Argentina,Tarjetas totales,Under 3.5,2.07
+Spain,Argentina,Tarjetas totales,Over 2.5,1.31
+Spain,Argentina,Tarjetas totales,Under 2.5,3.25
+Spain,Argentina,Tarjetas totales,Over 4.5,2.37
+Spain,Argentina,Tarjetas totales,Under 4.5,1.55
+Spain,Argentina,Ambos marcan,Si,1.83
+Spain,Argentina,Ambos marcan,No,1.91
+```
+
+## data\manual_odds\spain_argentina_epicbet.csv
+```python
+home_team,away_team,market,selection,odd
+Spain,Argentina,Resultado del partido,Spain,2.31
+Spain,Argentina,Resultado del partido,Draw,2.98
+Spain,Argentina,Resultado del partido,Argentina,3.83
+Spain,Argentina,Goles totales,Over 0.5,1.12
+Spain,Argentina,Goles totales,Under 0.5,6.94
+Spain,Argentina,Goles totales,Over 0.75,1.13
+Spain,Argentina,Goles totales,Under 0.75,6.52
+Spain,Argentina,Goles totales,Over 1.0,1.16
+Spain,Argentina,Goles totales,Under 1.0,5.62
+Spain,Argentina,Goles totales,Over 1.25,1.27
+Spain,Argentina,Goles totales,Under 1.25,3.91
+Spain,Argentina,Ambos marcan,Si,1.90
+Spain,Argentina,Ambos marcan,No,1.87
+```
+
+## data\reset_odds_tables.py
+```python
+import sqlite3
+
+conn = sqlite3.connect("data/db.sqlite")
+conn.execute("DROP TABLE IF EXISTS match_odds")
+conn.execute("DROP TABLE IF EXISTS goals_odds")
+conn.commit()
+conn.close()
+print("Tablas eliminadas.")
+```
+
+## model\corners_cards.py
+```python
+import sqlite3
+from collections import defaultdict
+from scipy.stats import poisson
+
+DB_PATH = "data/db.sqlite"
+
+DEFAULT_STATS = {"corners": 4.5, "yellow": 2.0, "matches": 5}
+
+CORNER_LINES = [5.5, 7.5, 9.5]
+CARD_LINES = [1.5, 2.5, 3.5]
+
+
+def probability_to_fair_odds(probability):
+    if probability <= 0:
+        return None
+    return round(100 / probability, 2)
+
+
+def get_team_averages():
+    """Promedios reales del Mundial 2026: córners desde kaggle_match_team_stats,
+    tarjetas amarillas totales de la selección / partidos reales jugados por el equipo."""
+    averages = defaultdict(lambda: DEFAULT_STATS)
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT team_name, AVG(corners), COUNT(*)
+            FROM kaggle_match_team_stats
+            WHERE corners IS NOT NULL
+            GROUP BY team_name
+        """)
+        corners_rows = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+
+        cursor.execute("""
+            SELECT team_name, SUM(yellow_cards)
+            FROM players
+            GROUP BY team_name
+        """)
+        total_yellow_by_team = {row[0]: row[1] for row in cursor.fetchall()}
+
+        conn.close()
+
+        equipos = set(corners_rows) | set(total_yellow_by_team)
+        for team in equipos:
+            avg_corners, partidos_jugados = corners_rows.get(team, (4.5, 0))
+            total_yellow = total_yellow_by_team.get(team, None)
+
+            avg_yellow = (
+                total_yellow / partidos_jugados
+                if total_yellow and partidos_jugados
+                else 2.0
+            )
+            averages[team] = {
+                "corners": round(avg_corners, 2) if avg_corners else 4.5,
+                "yellow": round(avg_yellow, 2),
+                "matches": partidos_jugados,
+            }
+        return averages
+
+    except sqlite3.OperationalError:
+        return averages
+
+
+def calculate_poisson_lines(lambda_value, lines):
+    """Probabilidad de Over/Under para cada línea, usando una distribución
+    de Poisson simple con el lambda combinado (local + visita)."""
+    result = {}
+    for line in lines:
+        # line siempre termina en .5, así que floor(line) = cantidad de eventos
+        # que hay que igualar o superar para el Over.
+        threshold = int(line)
+        over_prob = round((1 - poisson.cdf(threshold, lambda_value)) * 100, 1)
+        under_prob = round(100 - over_prob, 1)
+        result[line] = {
+            "over_prob": over_prob,
+            "under_prob": under_prob,
+            "fair_odd_over": probability_to_fair_odds(over_prob),
+            "fair_odd_under": probability_to_fair_odds(under_prob),
+        }
+    return result
+
+
+def predict_corners_cards(home_team, away_team, averages):
+    home = averages.get(home_team, DEFAULT_STATS)
+    away = averages.get(away_team, DEFAULT_STATS)
+
+    home_corners = home.get("corners", 4.5)
+    away_corners = away.get("corners", 4.5)
+    lambda_corners = home_corners + away_corners
+    lambda_cards = home.get("yellow", 2.0) + away.get("yellow", 2.0)
+
+    corner_lines = calculate_poisson_lines(lambda_corners, CORNER_LINES)
+    card_lines = calculate_poisson_lines(lambda_cards, CARD_LINES)
+
+    return {
+        "home_expected_corners": round(home_corners, 1),
+        "away_expected_corners": round(away_corners, 1),
+        "expected_corners": round(lambda_corners, 1),
+        "expected_cards": round(lambda_cards, 1),
+        # se mantienen por compatibilidad con código que ya los use
+        "over_9_5_corners_prob": corner_lines[9.5]["over_prob"],
+        "over_3_5_cards_prob": card_lines[3.5]["over_prob"],
+        "corner_lines": corner_lines,
+        "card_lines": card_lines,
+        "note": "Córners: promedio real Mundial 2026 (Kaggle). Tarjetas: estimado a partir del total de tarjetas por selección / partidos jugados.",
+    }
+```
+
+## model\elo.py
+```python
+import sqlite3
+
+DB_PATH = "data/db.sqlite"
+K_FACTOR = 20  # qué tan rápido se ajusta el rating tras cada partido
+BASE_RATING = 1500  # rating inicial para selecciones sin historial
+
+
+def get_finished_matches():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT home_team, away_team, home_score, away_score, utc_date
+        FROM matches
+        WHERE status = 'FINISHED'
+        ORDER BY utc_date ASC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def expected_score(rating_a, rating_b):
+    """Probabilidad esperada de que A le gane a B, según Elo"""
+    return 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
+
+
+def actual_score(home_goals, away_goals):
+    """1 = gana local, 0.5 = empate, 0 = gana visita"""
+    if home_goals > away_goals:
+        return 1.0, 0.0
+    elif home_goals < away_goals:
+        return 0.0, 1.0
+    else:
+        return 0.5, 0.5
+
+
+def calculate_elo_ratings():
+    matches = get_finished_matches()
+    ratings = {}
+
+    for home, away, home_goals, away_goals, date in matches:
+        ratings.setdefault(home, BASE_RATING)
+        ratings.setdefault(away, BASE_RATING)
+
+        exp_home = expected_score(ratings[home], ratings[away])
+        exp_away = 1 - exp_home
+
+        actual_home, actual_away = actual_score(home_goals, away_goals)
+
+        # ajuste extra por diferencia de goles (partidos goleados pesan más)
+        goal_diff = abs(home_goals - away_goals)
+        multiplier = 1 + (goal_diff - 1) * 0.15 if goal_diff > 1 else 1
+
+        ratings[home] += K_FACTOR * multiplier * (actual_home - exp_home)
+        ratings[away] += K_FACTOR * multiplier * (actual_away - exp_away)
+
+    return ratings
+
+
+if __name__ == "__main__":
+    ratings = calculate_elo_ratings()
+    ranked = sorted(ratings.items(), key=lambda x: x[1], reverse=True)
+
+    print("--- Ranking Elo (basado en el Mundial actual) ---")
+    for i, (team, rating) in enumerate(ranked[:15], 1):
+        print(f"{i}. {team}: {round(rating, 1)}")
+```
+
+## model\h2h.py
+```python
+import sqlite3
+
+DB_PATH = "data/db.sqlite"
+LAST_N = 5
+
+
+def get_all_h2h(team_a, team_b):
+    """Combina partidos del torneo actual + histórico, sin duplicar fuente"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT utc_date, home_team, away_team, home_score, away_score, stage
+        FROM matches
+        WHERE status = 'FINISHED'
+        AND ((home_team = ? AND away_team = ?) OR (home_team = ? AND away_team = ?))
+    """, (team_a, team_b, team_b, team_a))
+    current = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT date, home_team, away_team, home_score, away_score, tournament
+        FROM historical_matches
+        WHERE (home_team = ? AND away_team = ?) OR (home_team = ? AND away_team = ?)
+    """, (team_a, team_b, team_b, team_a))
+    historical = cursor.fetchall()
+
+    conn.close()
+
+    all_matches = list(current) + list(historical)
+    all_matches.sort(key=lambda x: x[0], reverse=True)  # más reciente primero
+    return all_matches
+
+
+def calculate_h2h_probability(team_a, team_b):
+    matches = get_all_h2h(team_a, team_b)
+
+    if not matches:
+        return {
+            "team_a": team_a,
+            "team_b": team_b,
+            "h2h_available": False,
+            "note": "Sin enfrentamientos históricos registrados entre estas selecciones",
+        }
+
+    recent = matches[:LAST_N]
+
+    wins_a = wins_b = draws = 0
+    goals_a = goals_b = 0
+    history = []
+
+    for date, home, away, hg, ag, comp in recent:
+        if home == team_a:
+            ga, gb = hg, ag
+        else:
+            ga, gb = ag, hg
+
+        goals_a += ga
+        goals_b += gb
+
+        if ga > gb:
+            wins_a += 1
+        elif ga < gb:
+            wins_b += 1
+        else:
+            draws += 1
+
+        history.append(f"{date} | {comp} | {home} {hg}-{ag} {away}")
+
+    n = len(recent)
+    # probabilidad empírica simple basada en frecuencia de resultados en los últimos N
+    prob_a = round((wins_a / n) * 100, 1)
+    prob_b = round((wins_b / n) * 100, 1)
+    prob_draw = round((draws / n) * 100, 1)
+
+    return {
+        "team_a": team_a,
+        "team_b": team_b,
+        "h2h_available": True,
+        "total_h2h_found": len(matches),
+        "matches_used": n,
+        "wins_a": wins_a,
+        "wins_b": wins_b,
+        "draws": draws,
+        "avg_goals_a": round(goals_a / n, 2),
+        "avg_goals_b": round(goals_b / n, 2),
+        "prob_a_win_h2h": prob_a,
+        "prob_b_win_h2h": prob_b,
+        "prob_draw_h2h": prob_draw,
+        "history": history,
+    }
+
+
+if __name__ == "__main__":
+    result = calculate_h2h_probability("Argentina", "England")
+
+    print(f"--- H2H: {result['team_a']} vs {result['team_b']} ---")
+
+    if not result["h2h_available"]:
+        print(result["note"])
+    else:
+        print(f"Enfrentamientos totales encontrados: {result['total_h2h_found']}")
+        print(f"Usando últimos {result['matches_used']}:\n")
+        for h in result["history"]:
+            print(f"  {h}")
+
+        print(f"\nVictorias {result['team_a']}: {result['wins_a']} ({result['prob_a_win_h2h']}%)")
+        print(f"Victorias {result['team_b']}: {result['wins_b']} ({result['prob_b_win_h2h']}%)")
+        print(f"Empates: {result['draws']} ({result['prob_draw_h2h']}%)")
+        print(f"Promedio goles {result['team_a']}: {result['avg_goals_a']}")
+        print(f"Promedio goles {result['team_b']}: {result['avg_goals_b']}")
+```
+
+## model\lineup_display.py
+```python
+# model/lineup_display.py
+
+def render_pitch_svg(team_data: dict, primary_color: str) -> str:
+    """
+    Dibuja una cancha vertical con los jugadores posicionados según
+    'line' (fila) y 'slot' (posición dentro de la fila) del JSON.
+    GK abajo, delanteros arriba.
+    """
+    width, height = 304, 200
+    max_line = max(p["line"] for p in team_data["players"])
+    lines = {}
+    for p in team_data["players"]:
+        lines.setdefault(p["line"], []).append(p)
+
+    svg_parts = [
+        f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">',
+        f'<rect x="0" y="0" width="{width}" height="{height}" fill="#0e3b1f" rx="8"/>',
+        f'<line x1="0" y1="{height/2}" x2="{width}" y2="{height/2}" stroke="#ffffff33" stroke-width="1"/>',
+        f'<circle cx="{width/2}" cy="{height/2}" r="25" fill="none" stroke="#ffffff33" stroke-width="1"/>',
+    ]
+
+    for line_num, players in lines.items():
+        y = height - (line_num / (max_line + 0.5)) * height
+        n = len(players)
+        for i, p in enumerate(sorted(players, key=lambda x: x["slot"])):
+            x = width * (i + 1) / (n + 1)
+            svg_parts.append(
+                f'<circle cx="{x}" cy="{y}" r="12" fill="{primary_color}" stroke="white" stroke-width="1.5"/>'
+                f'<text x="{x}" y="{y+5}" text-anchor="middle" font-size="13" font-weight="700" fill="white">{p["number"]}</text>'
+                f'<text x="{x}" y="{y+21}" text-anchor="middle" font-size="8" fill="white">{p["name"]}</text>'
+            )
+
+    svg_parts.append('</svg>')
+    return "".join(svg_parts)
+
+def render_lineups_stacked(home_data: dict, away_data: dict,
+                            home_name: str, away_name: str,
+                            home_color: str = "#AA151B",
+                            away_color: str = "#75AADB"):
+    """
+    Layout vertical genérico: cancha del equipo local arriba, visitante abajo.
+    Mobile-first, no asume Spain/Argentina.
+
+    home_data / away_data: dict con {"formation": str, "players": [...]}
+    home_name / away_name: nombre del equipo (viene de afuera, no del dict)
+    home_color / away_color: color primario de cada camiseta (hex).
+    """
+    import streamlit as st
+
+    st.markdown(f"**{home_name}** — {home_data['formation']}")
+    st.markdown(render_pitch_svg(home_data, home_color), unsafe_allow_html=True)
+
+    st.divider()
+
+    st.markdown(f"**{away_name}** — {away_data['formation']}")
+    st.markdown(render_pitch_svg(away_data, away_color), unsafe_allow_html=True)
+```
+
+## model\monte_carlo.py
+```python
+import numpy as np
+
+from model.poisson_model import calculate_team_stats
+
+N_SIMULATIONS = 10000
+
+
+def simulate_match(home_team, away_team, n_simulations=N_SIMULATIONS, seed=None):
+    """Simula el partido n_simulations veces usando los mismos lambda (goles
+    esperados) que ya calcula el modelo Poisson, pero en vez de resolver la
+    matriz analíticamente, sortea resultados individuales. Esto permite ver
+    distribución completa: percentiles de goles, racha de resultados, etc.
+    """
+    stats, avg_goals_match = calculate_team_stats()
+
+    if avg_goals_match is None or home_team not in stats or away_team not in stats:
+        return None
+
+    home = stats[home_team]
+    away = stats[away_team]
+
+    lambda_home = home["attack_strength"] * away["defense_strength"] * avg_goals_match
+    lambda_away = away["attack_strength"] * home["defense_strength"] * avg_goals_match
+
+    rng = np.random.default_rng(seed)
+    home_goals = rng.poisson(lambda_home, n_simulations)
+    away_goals = rng.poisson(lambda_away, n_simulations)
+
+    home_wins = int(np.sum(home_goals > away_goals))
+    draws = int(np.sum(home_goals == away_goals))
+    away_wins = int(np.sum(home_goals < away_goals))
+
+    total_goals = home_goals + away_goals
+    btts = int(np.sum((home_goals > 0) & (away_goals > 0)))
+
+    # Marcadores más frecuentes en las simulaciones
+    scorelines, counts = np.unique(
+        np.stack([home_goals, away_goals], axis=1), axis=0, return_counts=True
+    )
+    top_idx = np.argsort(counts)[::-1][:5]
+    top_scores = [
+        ((int(scorelines[i][0]), int(scorelines[i][1])), round(counts[i] / n_simulations * 100, 1))
+        for i in top_idx
+    ]
+
+    def pct(count):
+        return round(count / n_simulations * 100, 1)
+
+    return {
+        "n_simulations": n_simulations,
+        "lambda_home": round(lambda_home, 2),
+        "lambda_away": round(lambda_away, 2),
+        "home_win_prob": pct(home_wins),
+        "draw_prob": pct(draws),
+        "away_win_prob": pct(away_wins),
+        "btts_prob": pct(btts),
+        "over_1_5_prob": pct(int(np.sum(total_goals > 1))),
+        "over_2_5_prob": pct(int(np.sum(total_goals > 2))),
+        "over_3_5_prob": pct(int(np.sum(total_goals > 3))),
+        "avg_total_goals": round(float(np.mean(total_goals)), 2),
+        "goals_p10": int(np.percentile(total_goals, 10)),
+        "goals_p50": int(np.percentile(total_goals, 50)),
+        "goals_p90": int(np.percentile(total_goals, 90)),
+        "top_scores": top_scores,
+    }
+
+
+if __name__ == "__main__":
+    result = simulate_match("France", "England")
+    if result:
+        print(f"\n--- Monte Carlo: {result['n_simulations']} simulaciones ---")
+        print(f"Gana local: {result['home_win_prob']}% | Empate: {result['draw_prob']}% | Gana visita: {result['away_win_prob']}%")
+        print(f"Ambos anotan: {result['btts_prob']}%")
+        print(f"Más de 1.5: {result['over_1_5_prob']}% | Más de 2.5: {result['over_2_5_prob']}% | Más de 3.5: {result['over_3_5_prob']}%")
+        print(f"Goles totales — promedio: {result['avg_total_goals']}, p10: {result['goals_p10']}, p50: {result['goals_p50']}, p90: {result['goals_p90']}")
+        print("Marcadores más frecuentes:")
+        for score, prob in result["top_scores"]:
+            print(f"  {score[0]}-{score[1]}: {prob}%")
+    else:
+        print("Sin datos suficientes.")
+```
+
+## model\poisson_model.py
+```python
+import sqlite3
+from scipy.stats import poisson
+
+from data.lineup_adjustments import get_absences
+
+DB_PATH = "data/db.sqlite"
+MAX_GOALS = 6  # tope de goles a simular por equipo
+GOAL_LINES = [0.5, 1.5, 2.5, 3.5, 4.5]
+XG_WEIGHT = 0.4  # peso del xG real sobre el lambda Poisson cuando hay dato disponible
+
+
+def probability_to_fair_odds(probability):
+    """Converts a percentage probability into decimal fair odds."""
+    if probability <= 0:
+        return None
+    return round(100 / probability, 2)
+
+
+def calculate_goal_lines(score_matrix, total_probability):
+    """Probabilidad de Over/Under para cada línea de goles totales del partido."""
+    lines = {}
+    for line in GOAL_LINES:
+        over = sum(p for (h, a), p in score_matrix.items() if h + a > line) / total_probability
+        over_prob = round(over * 100, 1)
+        under_prob = round(100 - over_prob, 1)
+        lines[line] = {
+            "over_prob": over_prob,
+            "under_prob": under_prob,
+            "fair_odd_over": probability_to_fair_odds(over_prob),
+            "fair_odd_under": probability_to_fair_odds(under_prob),
+        }
+    return lines
+
+
+def get_finished_matches():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    rows = []
+
+    try:
+        cursor.execute("""
+            SELECT home_team, away_team, home_score, away_score
+            FROM matches
+            WHERE status = 'FINISHED'
+        """)
+        rows.extend(cursor.fetchall())
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("""
+            SELECT home_team, away_team, home_score, away_score
+            FROM historical_matches
+        """)
+        rows.extend(cursor.fetchall())
+    except sqlite3.OperationalError:
+        pass
+
+    conn.close()
+    return rows
+
+
+def calculate_team_stats():
+    """Calcula promedio de goles anotados/recibidos por equipo, y fuerza de ataque/defensa relativa"""
+    matches = get_finished_matches()
+
+    if not matches:
+        return {}, None
+
+    goals_for = {}
+    goals_against = {}
+    games_played = {}
+
+    for home, away, hg, ag in matches:
+        for team in (home, away):
+            goals_for.setdefault(team, 0)
+            goals_against.setdefault(team, 0)
+            games_played.setdefault(team, 0)
+
+        goals_for[home] += hg
+        goals_against[home] += ag
+        games_played[home] += 1
+
+        goals_for[away] += ag
+        goals_against[away] += hg
+        games_played[away] += 1
+
+    avg_goals_match = sum(hg + ag for _, _, hg, ag in matches) / (2 * len(matches))
+
+    stats = {}
+    for team in games_played:
+        gp = games_played[team]
+        avg_scored = goals_for[team] / gp
+        avg_conceded = goals_against[team] / gp
+
+        stats[team] = {
+            "avg_scored": avg_scored,
+            "avg_conceded": avg_conceded,
+            "attack_strength": avg_scored / avg_goals_match,
+            "defense_strength": avg_conceded / avg_goals_match,
+            "games_played": gp,
+        }
+
+    return stats, avg_goals_match
+
+
+def get_team_recent_xg(team_name):
+    """xG real más reciente del equipo, desde kaggle_match_prediction_features
+    (prev_avg_xg_scored). Busca la fila más nueva donde el equipo aparezca
+    como local o visita. Devuelve None si no hay dato."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT home_prev_avg_xg_scored, date FROM kaggle_match_prediction_features
+            WHERE home_team_name = ? AND home_prev_avg_xg_scored IS NOT NULL
+            ORDER BY date DESC LIMIT 1
+        """, (team_name,))
+        home_row = cursor.fetchone()
+
+        cursor.execute("""
+            SELECT away_prev_avg_xg_scored, date FROM kaggle_match_prediction_features
+            WHERE away_team_name = ? AND away_prev_avg_xg_scored IS NOT NULL
+            ORDER BY date DESC LIMIT 1
+        """, (team_name,))
+        away_row = cursor.fetchone()
+
+        conn.close()
+    except sqlite3.OperationalError:
+        return None
+
+    candidates = [r for r in (home_row, away_row) if r]
+    if not candidates:
+        return None
+
+    xg_value, _ = max(candidates, key=lambda r: r[1])
+    try:
+        return float(xg_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def calculate_expected_goals(home_team, away_team, lambda_home, lambda_away):
+    """Combina el lambda Poisson (histórico goles, ya ajustado por bajas si
+    corresponde) con el xG real reciente (Kaggle) cuando está disponible."""
+    xg_home = get_team_recent_xg(home_team)
+    xg_away = get_team_recent_xg(away_team)
+
+    expected_home = (lambda_home * (1 - XG_WEIGHT) + xg_home * XG_WEIGHT) if xg_home is not None else lambda_home
+    expected_away = (lambda_away * (1 - XG_WEIGHT) + xg_away * XG_WEIGHT) if xg_away is not None else lambda_away
+
+    return {
+        "poisson_home": round(lambda_home, 2),
+        "poisson_away": round(lambda_away, 2),
+        "xg_home": round(xg_home, 2) if xg_home is not None else None,
+        "xg_away": round(xg_away, 2) if xg_away is not None else None,
+        "expected_home": round(expected_home, 2),
+        "expected_away": round(expected_away, 2),
+        "expected_total": round(expected_home + expected_away, 2),
+        "has_real_xg": xg_home is not None or xg_away is not None,
+    }
+
+
+def apply_lineup_adjustment(team_name, lambda_value, absent_players):
+    """Resta al lambda del equipo el aporte goleador estimado de cada
+    jugador ausente (goles + 0.5*asistencias por partido jugado). Nunca
+    deja el lambda por debajo del 30% del valor original."""
+    if not absent_players:
+        return lambda_value, []
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    notes = []
+    total_reduction = 0.0
+
+    for player_name in absent_players:
+        try:
+            cursor.execute("""
+                SELECT goals, assists, matches_played FROM players
+                WHERE team_name = ? AND player_name = ?
+            """, (team_name, player_name))
+            row = cursor.fetchone()
+        except sqlite3.OperationalError:
+            row = None
+
+        if not row or not row[2]:
+            notes.append(f"{player_name}: sin datos suficientes, no se pudo ajustar")
+            continue
+
+        goals, assists, matches_played = row
+        goals = goals or 0
+        assists = assists or 0
+        production_per_match = (goals + 0.5 * assists) / matches_played
+        total_reduction += production_per_match
+        notes.append(f"{player_name}: -{round(production_per_match, 2)} goles/partido estimados")
+
+    conn.close()
+
+    adjusted = max(lambda_value - total_reduction, lambda_value * 0.3)
+    return round(adjusted, 2), notes
+
+
+def predict_match(home_team, away_team):
+    stats, avg_goals_match = calculate_team_stats()
+
+    if avg_goals_match is None or home_team not in stats or away_team not in stats:
+        print(f"Sin datos suficientes para {home_team} o {away_team}")
+        return None
+
+    home = stats[home_team]
+    away = stats[away_team]
+
+    lambda_home = home["attack_strength"] * away["defense_strength"] * avg_goals_match
+    lambda_away = away["attack_strength"] * home["defense_strength"] * avg_goals_match
+
+    # Ajuste por bajas confirmadas (11 inicial), si hay alguna cargada
+    # manualmente en data/lineup_adjustments.py para este cruce.
+    lineup_notes = []
+    absences = get_absences(home_team, away_team)
+    if absences.get(home_team):
+        lambda_home, notes_h = apply_lineup_adjustment(home_team, lambda_home, absences[home_team])
+        lineup_notes += [f"{home_team}: {n}" for n in notes_h]
+    if absences.get(away_team):
+        lambda_away, notes_a = apply_lineup_adjustment(away_team, lambda_away, absences[away_team])
+        lineup_notes += [f"{away_team}: {n}" for n in notes_a]
+
+    score_matrix = {}
+    for h in range(MAX_GOALS + 1):
+        for a in range(MAX_GOALS + 1):
+            prob = poisson.pmf(h, lambda_home) * poisson.pmf(a, lambda_away)
+            score_matrix[(h, a)] = prob
+
+    home_win = sum(p for (h, a), p in score_matrix.items() if h > a)
+    draw = sum(p for (h, a), p in score_matrix.items() if h == a)
+    away_win = sum(p for (h, a), p in score_matrix.items() if h < a)
+
+    total_probability = home_win + draw + away_win
+    home_win /= total_probability
+    draw /= total_probability
+    away_win /= total_probability
+
+    btts = sum(p for (h, a), p in score_matrix.items() if h > 0 and a > 0) / total_probability
+    over_2_5 = sum(p for (h, a), p in score_matrix.items() if h + a > 2.5) / total_probability
+    goal_lines = calculate_goal_lines(score_matrix, total_probability)
+    expected_goals = calculate_expected_goals(home_team, away_team, lambda_home, lambda_away)
+
+    top_scores = sorted(score_matrix.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    home_win_prob = round(home_win * 100, 1)
+    draw_prob = round(draw * 100, 1)
+    away_win_prob = round(away_win * 100, 1)
+
+    return {
+        "home_team": home_team,
+        "away_team": away_team,
+        "lambda_home": round(lambda_home, 2),
+        "lambda_away": round(lambda_away, 2),
+        "home_win_prob": home_win_prob,
+        "draw_prob": draw_prob,
+        "away_win_prob": away_win_prob,
+        "fair_odds": {
+            "home": probability_to_fair_odds(home_win_prob),
+            "draw": probability_to_fair_odds(draw_prob),
+            "away": probability_to_fair_odds(away_win_prob),
+        },
+        "btts_prob": round(btts * 100, 1),
+        "over_2_5_prob": round(over_2_5 * 100, 1),
+        "goal_lines": goal_lines,
+        "expected_goals": expected_goals,
+        "lineup_notes": lineup_notes,
+        "top_scores": [(score, round(p * 100, 1)) for score, p in top_scores],
+    }
+
+
+if __name__ == "__main__":
+    result = predict_match("Argentina", "England")
+
+    if result:
+        print(f"\n--- {result['home_team']} vs {result['away_team']} ---")
+        print(f"Goles esperados: {result['home_team']} {result['lambda_home']} - {result['lambda_away']} {result['away_team']}")
+        if result["lineup_notes"]:
+            print("\nAjustes por bajas confirmadas:")
+            for n in result["lineup_notes"]:
+                print(f"  {n}")
+        eg = result["expected_goals"]
+        print(f"\nExpected Goals combinado (Poisson + xG real):")
+        print(f"  {result['home_team']}: {eg['expected_home']} (Poisson {eg['poisson_home']} / xG real {eg['xg_home']})")
+        print(f"  {result['away_team']}: {eg['expected_away']} (Poisson {eg['poisson_away']} / xG real {eg['xg_away']})")
+        print(f"  Total esperado: {eg['expected_total']}")
+        print(f"\nProbabilidades:")
+        print(f"  Gana {result['home_team']}: {result['home_win_prob']}%")
+        print(f"  Empate: {result['draw_prob']}%")
+        print(f"  Gana {result['away_team']}: {result['away_win_prob']}%")
+        print(f"  Ambos anotan: {result['btts_prob']}%")
+        print(f"\nMarcadores más probables:")
+        for (h, a), prob in result['top_scores']:
+            print(f"  {h}-{a}: {prob}%")
+```
+
+## requirements.txt
+```python
+streamlit
+pandas
+numpy
+scipy
+requests
+plotly
+python-dotenv
+streamlit-option-menu
+```
+
+======================================================================
+FIN DEL RESUMEN
+======================================================================
