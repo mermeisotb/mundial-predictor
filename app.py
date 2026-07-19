@@ -9,6 +9,8 @@ from model.elo import calculate_elo_ratings
 from model.poisson_model import predict_match
 from model.h2h import calculate_h2h_probability
 from model.corners_cards import get_team_averages, predict_corners_cards
+from data.load_lineups import get_lineup
+from model.lineup_display import render_lineups_stacked
 
 DB_PATH = "data/db.sqlite"
 
@@ -544,21 +546,22 @@ def render_match_analysis(match_id, home, away, elo_ratings, corner_averages, sh
         flag = team_flag_url(away)
         if flag:
             st.image(flag, width=60)
+        lineup_data = get_lineup(home, away)
+        if lineup_data:
+            if st.button("🏟️", key=f"lineups_btn_{match_id}", help="Ver alineaciones confirmadas"):
+                st.session_state[f"show_lineups_{match_id}"] = True
 
-    # --- Alineaciones (solo para el partido de mañana) ---
-    if home == "Spain" and away == "Argentina":
-        if st.button("📋 Ver alineaciones confirmadas", key=f"lineups_btn_{match_id}"):
-            st.session_state[f"show_lineups_{match_id}"] = True
-
-        if st.session_state.get(f"show_lineups_{match_id}"):
-            @st.dialog("Alineaciones — Spain vs Argentina", width="large")
-            def _lineups_dialog():
-                import json
-                with open("data/spain_argentina_lineups.json", encoding="utf-8") as f:
-                    data = json.load(f)
-                render_lineups_stacked(data["spain"], data["argentina"])
-            _lineups_dialog()
-            st.session_state[f"show_lineups_{match_id}"] = False
+    if lineup_data and st.session_state.get(f"show_lineups_{match_id}", False):
+        @st.dialog("Alineaciones", width="large")
+        def _lineups_dialog():
+            render_lineups_stacked(
+                lineup_data[home], lineup_data[away],
+                home_color=team_color(home), away_color=team_color(away),
+            )
+            if st.button("Cerrar"):
+                st.session_state[f"show_lineups_{match_id}"] = False
+                st.rerun()
+        _lineups_dialog()
 
     col1, col2, col3 = st.columns(3)
 
